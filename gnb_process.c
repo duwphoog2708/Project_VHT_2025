@@ -51,7 +51,7 @@ int amf_current_weight[NUM_AMF];
 int amf_weight[NUM_AMF];
 
 void init_shm() {
-    int fd = shm_open(SHM_NAME, O_RDONLY, 0);
+    int fd = shm_open(SHM_NAME, O_RDWR, 0666);
     if (fd < 0) { perror("gNB shm_open"); exit(1); }
     shm = mmap(NULL, SHM_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 }
