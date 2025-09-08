@@ -103,7 +103,10 @@ void *ue_thread(void *arg) {
                 }
             } else {
                 if (poll_dl_msg(ue->idx, &resp)) {
-                    if (resp.msgid == MSG_RRC_UE_PAGING && (resp.s_tmsi & 0xFFFFFFFFFF) == ue->s_tmsi) {
+	             if(resp.msgid == MSG_RRC_UE_PAGING){
+		//	printf("UE%d: got Paging S-TMSI = 0x%llx, saved S-TMSI=0x%llx\n", ue->idx, (unsigned long long)(resp.s_tmsi & 0xFFFFFFFFFF), (unsigned long long)ue->s_tmsi);
+		     }
+                     if (resp.msgid == MSG_RRC_UE_PAGING && (resp.s_tmsi & 0xFFFFFFFFFF) == ue->s_tmsi) {
                         req.msgid = MSG_UE_RRC_CONNECTION_REQUEST;
                         req.bitmask = BM_5G_STMSI;
                         req.ue_id = ue->idx;
@@ -112,13 +115,15 @@ void *ue_thread(void *arg) {
                         send_ul_msg(ue->idx, &req);
                         while (!poll_dl_msg(ue->idx, &resp)) usleep(2000);
                         if (resp.msgid == MSG_RRC_UE_CONNECTION_RESPONSE) {
+			    ue->s_tmsi = resp.s_tmsi & 0xFFFFFFFFFF;
                             ue->service_count++;
                             if (ue->service_count == ue->x1) {
                                 ue->s_tmsi = 0;
                                 usleep(ue->z * 1000);
                             }
-                            if (ue->service_count >= ue->x2) {
-                                ue->state = 2;
+                   //         if (ue->service_count >= ue->x2) {
+                              if(ue-> service_count >= ue->x2){
+				  ue->state = 2;
                                 shm->ue_states[ue->idx] = 2;
                                 break;
                             }
@@ -167,3 +172,4 @@ int main() {
     printf("UE process: all UE reached CONNECTED and exited.\n");
     return 0;
 }
+	
