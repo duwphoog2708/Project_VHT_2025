@@ -51,11 +51,9 @@ int amf_current_weight[NUM_AMF];
 int amf_weight[NUM_AMF];
 
 void init_shm() {
-    int fd = shm_open(SHM_NAME, O_RDONLY, 0);
+    int fd = shm_open(SHM_NAME, O_RDWR, 0666);
     if (fd < 0) { perror("gNB shm_open"); exit(1); }
-    void *map = mmap(NULL, SHM_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (map == MAP_FAILED) { perror("gNB mmap"); exit(1); }
-    shm = map;
+    shm = mmap(NULL, SHM_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 }
 
 int pick_amf_wrr() {
@@ -65,13 +63,20 @@ int pick_amf_wrr() {
     int best_val = -2147483648;
     for (int i = 0; i < NUM_AMF; i++) {
         amf_current_weight[i] += amf_weight[i];
-        if (amf_current_weight[i] > best_val) {  // Removed capacity check
+        if (amf_current_weight[i] > best_val && amf_counts[i] < amf_capacity[i]) {
             best_val = amf_current_weight[i];
             best_i = i;
         }
     }
     if (best_i >= 0) {
         amf_current_weight[best_i] -= total;
+    } else {
+        for (int i = 0; i < NUM_AMF; i++) {
+            if (amf_counts[i] < amf_capacity[i]) {
+                best_i = i;
+                break;
+            }
+        }
     }
     return best_i;
 }
@@ -131,7 +136,14 @@ int main() {
 
     int handled_initial = 0;
     while (1) {
-        // Removed the state==0 decrement loop
+        pthread_mutex_lock(&shm->mutex);
+        for (int i = 0; i < NUM_UE; i++) {
+            if (shm->ue_states[i] == 0 && ue_to_amf[i] >= 0) {
+                amf_counts[ue_to_amf[i]]--;
+                ue_to_amf[i] = -1;
+            }
+        }
+        pthread_mutex_unlock(&shm->mutex);
 
         for (int i = 0; i < NUM_UE; i++) {
             int do_process = 0;
@@ -148,10 +160,6 @@ int main() {
 
             if (m.msgid == MSG_UE_RRC_CONNECTION_REQUEST) {
                 if (m.bitmask & BM_RANDOM_VALUE) {
-                    if (ue_to_amf[i] >= 0) {  // De-reg from old AMF
-                        amf_counts[ue_to_amf[i]]--;
-                        ue_to_amf[i] = -1;
-                    }
                     int amf = pick_amf_wrr();
                     if (amf < 0) continue;
                     ue_to_amf[i] = amf;
@@ -173,7 +181,13 @@ int main() {
                         handled_initial++;
                     }
                 } else if (m.bitmask & BM_5G_STMSI) {
-                    int amf = (m.s_tmsi >> 30) & 0x3FF;  // Extract AMF index from s_tmsi
+                    int amf = ue_to_amf[i];
+                    if (amf < 0) {
+                        amf = pick_amf_wrr();
+                        if (amf < 0) continue;
+                        ue_to_amf[i] = amf;
+                        amf_counts[amf]++;
+                    }
                     Message ngap = {0};
                     ngap.msgid = MSG_RRC_NGAP_REQ;
                     ngap.bitmask = BM_5G_STMSI;
@@ -182,11 +196,16 @@ int main() {
                     ngap.s_tmsi = m.s_tmsi;
                     Message ngap_resp = {0};
                     send_ngap_to_amf(amf, &ngap, &ngap_resp);
+		   // if(send_ngap_to_amf(amf, &ngap, &ngap_resp) == 0){
                     pthread_mutex_lock(&shm->mutex);
                     shm->dl[i].msgid = MSG_RRC_UE_CONNECTION_RESPONSE;
                     shm->dl_ready[i] = 1;
-                    shm->ue_states[i] = (shm->ue_states[i] == 2) ? 2 : 1;
+//		    shm->ue_states[i] = 2;
+//                    shm->ue_states[i] = (shm->ue_states[i] == 2) ? 2 : 1;
                     pthread_mutex_unlock(&shm->mutex);
+
+		   // printf("gNB: foward CONNECT_RESPONSE to UE %d s_tmsi = 0x%llX\n", i, (unsigned long long) (ngap_resp.s_tmsi & 0xFFFFFFFFFF));
+		   // }
                 }
             }
         }
@@ -194,18 +213,23 @@ int main() {
         int connected = 0;
         pthread_mutex_lock(&shm->mutex);
         for (int i = 0; i < NUM_UE; i++) if (shm->ue_states[i] == 2) connected++;
+//	printf("gNB: UE%d CONNECTED (total connected=%d)\n", uid, connected);
         pthread_mutex_unlock(&shm->mutex);
-        if (connected == NUM_UE && handled_initial >= NUM_UE) {
+	printf("gNB: total UE CONNECTED=%d\n", connected);
+        if ( connected == NUM_UE) {
             printf("gNB: all UE CONNECTED. distribution:\n");
-            for (int k = 0; k < NUM_AMF; k++) {
-                printf("AMF%d: %d UEs (%.2f%%)\n", k+1, amf_counts[k], (float)amf_counts[k]/NUM_UE*100.0f);
-            }
+  //          fflush(stdout);
+  //          for (int k = 0; k < NUM_AMF; k++) {
+//                printf("AMF%d: %d UEs (%.2f%%)\n", k+1, amf_counts[k], (float)amf_counts[k]/NUM_UE*100.0f);
+//		fflush(stdout);
+        }
             Message term = { .msgid = 0xFF };
             for (int i = 0; i < NUM_AMF; i++) send_ngap_to_amf(i, &term, NULL);
             break;
-        }
+//        }
         usleep(2000);
     }
 
     return 0;
 }
+	
