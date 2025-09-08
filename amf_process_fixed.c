@@ -7,6 +7,7 @@
 #include <arpa/inet.h>
 #include <time.h>
 #include <netinet/sctp.h>
+#include <sys/time.h>
 
 #define AMF_BASE_PORT 9101
 #define GNB_PAGING_PORT 9200
@@ -29,6 +30,19 @@ int amf_index_global;
 int capacity_global;
 int current_load = 0;
 uint16_t registered_ues[NUM_UE] = {0};
+uint64_t ue_s_tmsi[NUM_UE] = {0};
+
+void print_current_time(){
+	struct timeval tv;
+	struct tm* tm_info;
+	gettimeofday(&tv, NULL);
+	char buff[64];
+	tm_info = localtime(&tv.tv_sec);
+	
+	strftime(buff, sizeof(buff), "%Y-%m-%d %H-%M-%S", tm_info);
+//	int millisec = tv.tv_usec / 1000;
+	printf("[Time] %s:%06ld\n", buff, tv.tv_usec);
+}
 
 void send_paging_to_gnb(Message *paging) {
     int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_SCTP);
@@ -42,6 +56,7 @@ void send_paging_to_gnb(Message *paging) {
     close(sock);
 }
 
+// New function to handle the paging thread
 void *send_paging_thread(void *arg) {
     Message *p = (Message *)arg;
     int rnds[6] = {500, 1000, 1500, 2000, 2500, 3000};
@@ -60,7 +75,8 @@ void *handle_connection(void *arg) {
     if (r <= 0) { close(fd); return NULL; }
 
     if (req.msgid == MSG_RRC_NGAP_REQ) {
-        if (req.bitmask & BM_RANDOM_VALUE) {  // Removed capacity check
+        if (req.bitmask & BM_RANDOM_VALUE && current_load < capacity_global) {
+	   // uint32_t rand_tmsii = rand() & 0xFFFFFF ;
             uint64_t s = ((uint64_t)(amf_index_global & 0x3FF) << 30) | // Set ID (10 bits)
                          ((uint64_t)(amf_index_global & 0x3F) << 24) | // Pointer (6 bits)
                          (req.tmsi & 0xFFFFFF); // TMSI (24 bits)
@@ -70,10 +86,12 @@ void *handle_connection(void *arg) {
             resp.ue_id = req.ue_id;
             resp.tmsi = req.tmsi;
             resp.s_tmsi = s;
+            ue_s_tmsi[req.ue_id] = s;
             sctp_sendmsg(fd, &resp, sizeof(resp), NULL, 0, 0, 0, 0, 0, 0);
             if (!registered_ues[req.ue_id]) {
                 registered_ues[req.ue_id] = 1;
                 current_load++;
+		print_current_time();
                 printf("AMF%d: current load = %d (%.2f%%)\n", amf_index_global+1, current_load, (float)current_load/NUM_UE*100.0f);
             }
             Message paging = {0};
@@ -81,34 +99,28 @@ void *handle_connection(void *arg) {
             paging.bitmask = BM_5G_STMSI;
             paging.ue_id = req.ue_id;
             paging.s_tmsi = s;
-            pthread_t t;
+            pthread_t t; 
             Message *mp = malloc(sizeof(Message));
             *mp = paging;
             pthread_create(&t, NULL, send_paging_thread, mp);
             pthread_detach(t);
         } else if (req.bitmask & BM_5G_STMSI) {
-            // Check ownership
-            int extracted_amf = (req.s_tmsi >> 30) & 0x3FF;
-            if (extracted_amf != amf_index_global) { close(fd); return NULL; }
             Message resp = {0};
             resp.msgid = MSG_NGAP_RESP;
             resp.bitmask = BM_5G_STMSI;
             resp.ue_id = req.ue_id;
+	    if(ue_s_tmsi[req.ue_id]==0){
+		uint64_t s = ((uint64_t)(amf_index_global & 0x3FF) << 30) |
+			  ((uint64_t)(amf_index_global & 0x3F) << 24) |
+			  (req.tmsi & 0xFFFFFF);
+		ue_s_tmsi[req.ue_id] = s;
+	    }
+            resp.s_tmsi = ue_s_tmsi[req.ue_id];
             sctp_sendmsg(fd, &resp, sizeof(resp), NULL, 0, 0, 0, 0, 0, 0);
-            // Schedule next paging
-            Message paging = {0};
-            paging.msgid = MSG_NGAP_RESP;
-            paging.bitmask = BM_5G_STMSI;
-            paging.ue_id = req.ue_id;
-            paging.s_tmsi = req.s_tmsi;
-            pthread_t t;
-            Message *mp = malloc(sizeof(Message));
-            *mp = paging;
-            pthread_create(&t, NULL, send_paging_thread, mp);
-            pthread_detach(t);
         }
     } else if (req.msgid == 0xFF) {
         printf("AMF%d final: %d UEs (%.2f%%)\n", amf_index_global+1, current_load, (float)current_load/NUM_UE*100.0f);
+//	fflush(stdout);
     }
     close(fd);
     return NULL;
