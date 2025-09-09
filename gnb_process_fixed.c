@@ -134,7 +134,7 @@ int main() {
 
     pthread_t t; pthread_create(&t, NULL, paging_server, NULL);
 
-    int handled_initial = 0;
+//    int handled_initial = 0;
     while (1) {
         pthread_mutex_lock(&shm->mutex);
         for (int i = 0; i < NUM_UE; i++) {
@@ -178,7 +178,7 @@ int main() {
                         shm->dl_ready[i] = 1;
                         shm->ue_states[i] = 1;
                         pthread_mutex_unlock(&shm->mutex);
-                        handled_initial++;
+               //         handled_initial++;
                     }
                 } else if (m.bitmask & BM_5G_STMSI) {
                     int amf = ue_to_amf[i];
