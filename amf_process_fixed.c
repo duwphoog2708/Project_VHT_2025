@@ -86,7 +86,7 @@ void *handle_connection(void *arg) {
             resp.ue_id = req.ue_id;
             resp.tmsi = req.tmsi;
             resp.s_tmsi = s;
-            ue_s_tmsi[req.ue_id] = s;
+            ue_s_tmsi[req.ue_id] = s; // luu S-TMSI ma AMF cap cho UE
             sctp_sendmsg(fd, &resp, sizeof(resp), NULL, 0, 0, 0, 0, 0, 0);
             if (!registered_ues[req.ue_id]) {
                 registered_ues[req.ue_id] = 1;
