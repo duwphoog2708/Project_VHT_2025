@@ -222,7 +222,7 @@ int main() {
   //          for (int k = 0; k < NUM_AMF; k++) {
 //                printf("AMF%d: %d UEs (%.2f%%)\n", k+1, amf_counts[k], (float)amf_counts[k]/NUM_UE*100.0f);
 //		fflush(stdout);
-        }
+       // }
             Message term = { .msgid = 0xFF };
             for (int i = 0; i < NUM_AMF; i++) send_ngap_to_amf(i, &term, NULL);
             break;
