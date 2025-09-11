@@ -7,6 +7,7 @@
 #include <sys/mman.h>
 #include <time.h>
 #include <stdint.h>
+#include <sys/time.h>
 
 #define NUM_UE 200
 #define SHM_NAME "/5g_sim_shm"
@@ -18,6 +19,12 @@
 #define MSG_RRC_UE_PAGING             0x14
 #define BM_RANDOM_VALUE 0x01
 #define BM_5G_STMSI     0x02
+
+enum UE_State{
+	UE_IDLE,
+	UE_REGISTERED,
+	UE_CONNECTED
+};
 
 typedef struct {
     uint8_t msgid;
@@ -42,13 +49,22 @@ typedef struct {
     int idx;
     uint64_t tmsi;
     uint64_t s_tmsi;
-    int x, z, x1, x2;
-    int service_count;
-    int state;
+    int x; // z, x1, x2;
+  //  int service_count;
+    enum UE_State state;
+    unsigned long long next_action_time;
 } UECtx;
+
+UECtx ue_list[NUM_UE];
 
 static inline int rand_step500() {
     return 500 * (rand() % 6 + 1);
+}
+
+unsigned long long current_millis(){
+	struct timeval tv;
+	gettimeofday(&tv, NULL);
+	return tv.tv_sec * 1000ULL + tv_tv_usec / 1000;
 }
 
 static void init_shm() {
@@ -79,54 +95,31 @@ int poll_dl_msg(int idx, Message *out) {
     return got;
 }
 
-void *ue_thread(void *arg) {
+// send_thread – gửi uplink(UE->gNB)
+void *send_thread(void *arg) {
     UECtx *ue = (UECtx*)arg;
-    srand(time(NULL) ^ (ue->tmsi & 0xFFFF)); // Unique seed per UE
-    Message req, resp;
-    while (ue->state != 2) {
-        if (ue->state == 0) {
+    Message req;
+
+    while (ue->state != UE_CONNECTED) {
+        if (ue->state == UE_IDLE && ue->uplink_ready) {
             if (ue->s_tmsi == 0) {
-                req.msgid = MSG_UE_RRC_CONNECTION_REQUEST;
+                // Attach lần đầu
+                req.msgid  = MSG_UE_RRC_CONNECTION_REQUEST;
                 req.bitmask = BM_RANDOM_VALUE;
-                req.ue_id = ue->idx;
-                req.tmsi = ue->tmsi;
+                req.ue_id  = ue->idx;
+                req.tmsi   = ue->tmsi;
                 req.s_tmsi = 0;
                 send_ul_msg(ue->idx, &req);
-                while (!poll_dl_msg(ue->idx, &resp)) usleep(2000);
-                if (resp.msgid == MSG_RRC_UE_CONNECTION_RESPONSE) {
-                    ue->s_tmsi = resp.s_tmsi & 0xFFFFFFFFFF; // Mask to 40 bits
-                    ue->state = 1;
-                    shm->ue_states[ue->idx] = 1;
-                    usleep(ue->x * 1000);
-                    ue->state = 0;
-                    shm->ue_states[ue->idx] = 0;
-                }
+                ue->uplink_ready = 0;
             } else {
-                if (poll_dl_msg(ue->idx, &resp)) {
-                    if (resp.msgid == MSG_RRC_UE_PAGING && (resp.s_tmsi & 0xFFFFFFFFFF) == ue->s_tmsi) {
-                        req.msgid = MSG_UE_RRC_CONNECTION_REQUEST;
-                        req.bitmask = BM_5G_STMSI;
-                        req.ue_id = ue->idx;
-                        req.tmsi = ue->tmsi;
-                        req.s_tmsi = ue->s_tmsi;
-                        send_ul_msg(ue->idx, &req);
-                        while (!poll_dl_msg(ue->idx, &resp)) usleep(2000);
-                        if (resp.msgid == MSG_RRC_UE_CONNECTION_RESPONSE) {
-                            ue->service_count++;
-                            if (ue->service_count == ue->x1) {
-                                ue->s_tmsi = 0;
-                                usleep(ue->z * 1000);
-                            }
-                            if (ue->service_count >= ue->x2) {
-                                ue->state = 2;
-                                shm->ue_states[ue->idx] = 2;
-                                break;
-                            }
-                        }
-                    }
-                } else {
-                    usleep(1000);
-                }
+                // Re-attach theo Paging (sử dụng S-TMSI)
+                req.msgid  = MSG_UE_RRC_CONNECTION_REQUEST;
+                req.bitmask = BM_5G_STMSI;
+                req.ue_id  = ue->idx;
+                req.tmsi   = ue->tmsi;
+                req.s_tmsi = ue->s_tmsi;
+                send_ul_msg(ue->idx, &req);
+                ue->uplink_ready = 0;
             }
         }
         usleep(1000);
@@ -134,36 +127,76 @@ void *ue_thread(void *arg) {
     return NULL;
 }
 
+// recv_thread – nhận downlink (gNB->UE)
+void *recv_thread(void *arg) {
+    UECtx *ue = (UECtx*)arg;
+    Message resp;
+    unsigned long long now = current_millis();
+    while (ue->state != UE_CONNECTED) {
+        if (poll_dl_msg(ue->idx, &resp)) {
+            if (resp.msgid == MSG_RRC_UE_CONNECTION_RESPONSE) {
+                ue->s_tmsi = resp.s_tmsi & 0xFFFFFFFFFF;
+
+                if (ue->state == UE_IDLE && ue->s_tmsi != 0) {
+                    // Lần đầu attach → sang REGISTERED
+                    ue->state = UE_REGISTERED;
+                    shm->ue_states[ue->idx] = UE_REGISTERED;
+
+		    ue->next_action_time = now + ue->x; // setup timer
+                    printf("[UE %d] Registered with S-TMSI=0x%llx\n",
+                           ue->idx, (unsigned long long)ue->s_tmsi);
+
+                    // Sau x ms → quay lại IDLE
+                   if(ue->state = UE_REGISTERED && ue->next_action_time > 0 && now >= ue->next_action_time){
+
+                    ue->state = UE_IDLE;
+                    shm->ue_states[ue->idx] = UE_IDLE;
+                    ue->uplink_ready = 0; // đợi paging
+		    ue->next_action_time = 0;
+		   }
+                }
+                else if (ue->state == UE_IDLE && ue->s_tmsi != 0) {
+                    // Response sau khi Paging → sang CONNECTED
+                    ue->state = UE_CONNECTED;
+                    shm->ue_states[ue->idx] = UE_CONNECTED;
+
+                    printf("[UE %d] Connected after Paging Response\n", ue->idx);
+                }
+            }
+            else if (resp.msgid == MSG_RRC_UE_PAGING) {
+                if ((resp.s_tmsi & 0xFFFFFFFFFF) == ue->s_tmsi) {
+                    printf("[UE %d] Got PAGING -> uplink again\n", ue->idx);
+                    ue->uplink_ready = 1; // bật cờ gửi uplink
+                }
+            }
+        } else {
+            usleep(1000);
+        }
+    }
+    return NULL;
+}
+
 int main() {
     srand(time(NULL));
     init_shm();
-
-    UECtx ues[NUM_UE];
-    pthread_t th[NUM_UE];
-    for (int i = 0; i < NUM_UE; i++) {
-        ues[i].idx = i;
-        ues[i].tmsi = 452040000000001ULL + i;
-        ues[i].s_tmsi = 0;
-        ues[i].x = rand_step500();
-        ues[i].z = rand_step500();
-        do {
-            ues[i].x1 = rand() % 21;
-            ues[i].x2 = rand() % 21;
-        } while (ues[i].x2 <= ues[i].x1);
-        ues[i].service_count = 0;
-        ues[i].state = 0;
-        shm->ul_ready[i] = 0;
-        shm->dl_ready[i] = 0;
-        shm->ue_states[i] = 0;
-        pthread_create(&th[i], NULL, ue_thread, &ues[i]);
-        usleep(2000);
+    
+    for(int i=0;i<NUM_UE;i++){
+	ue_list[i].idx = i;
+	ue_list[i].tmsi = 452040000000001ULL + i;
+	ue_list[i].s_tmsi =  0;
+	ue_list[i].x = rand_step500();
+//	ue_list[i].service_count = 0;
+	ue_list[i].state =  UE_IDLE;
+	ue_list[i].next_action_time = 0;
     }
+    pthread_t tid_send, tid_recv;
+    pthread_create(&tid_send, NULL, uplink_thread, &ue_list[i]);
+    pthread_create(&tid_recv, NULL, downlink_thread, &ue_list[i]);
 
-    for (int i = 0; i < NUM_UE; i++) pthread_join(th[i], NULL);
-
-    pthread_mutex_destroy(&shm->mutex);
-    munmap(shm, SHM_SIZE);
-    shm_unlink(SHM_NAME);
-    printf("UE process: all UE reached CONNECTED and exited.\n");
+    pthread_join(tid_send, NULL);
+    pthread_join(tid_recv, NULL);
     return 0;
 }
+	
+
+
