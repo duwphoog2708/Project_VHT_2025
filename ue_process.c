@@ -137,7 +137,7 @@ void *recv_thread(void *arg) {
             if (resp.msgid == MSG_RRC_UE_CONNECTION_RESPONSE) {
                 //ue->s_tmsi = resp.s_tmsi & 0xFFFFFFFFFF;
 
-                if (ue->state == UE_IDLE && ue->s_tmsi != 0) {
+                if (ue->state == UE_IDLE && ue->s_tmsi == 0) {
                     // Lần đầu attach → sang REGISTERED
 					ue->s_tmsi = resp.s_tmsi & 0xFFFFFFFFFF; // UE lưu S-TMSI
                     ue->state = UE_REGISTERED;
