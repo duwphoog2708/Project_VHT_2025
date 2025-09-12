@@ -183,7 +183,9 @@ void *recv_thread(void *arg) {
 int main() {
     srand(time(NULL));
     init_shm();
-    
+
+	pthread_t tid_send;
+	pthread_t tid_recv;
     for(int i=0;i<NUM_UE;i++){
 	ue_list[i].idx = i;
 	ue_list[i].tmsi = 452040000000001ULL + i;
@@ -193,7 +195,7 @@ int main() {
 	ue_list[i].state =  UE_IDLE;
 	ue_list[i].next_action_time = 0;
     }
-    pthread_t tid_send, tid_recv;
+    //pthread_t tid_send, tid_recv;
 	for(int i=0;i<NUM_UE;i++){
     pthread_create(&tid_send, NULL, uplink_thread, &ue_list[i]);
     pthread_create(&tid_recv, NULL, downlink_thread, &ue_list[i]);
