@@ -194,9 +194,11 @@ int main() {
 	ue_list[i].next_action_time = 0;
     }
     pthread_t tid_send, tid_recv;
+	for(int i=0;i<NUM_UE;i++){
     pthread_create(&tid_send, NULL, uplink_thread, &ue_list[i]);
     pthread_create(&tid_recv, NULL, downlink_thread, &ue_list[i]);
-
+	}
+	
     pthread_join(tid_send, NULL);
     pthread_join(tid_recv, NULL);
     return 0;
