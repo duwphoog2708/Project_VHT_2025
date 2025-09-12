@@ -135,10 +135,11 @@ void *recv_thread(void *arg) {
     while (ue->state != UE_CONNECTED) {
         if (poll_dl_msg(ue->idx, &resp)) {
             if (resp.msgid == MSG_RRC_UE_CONNECTION_RESPONSE) {
-                ue->s_tmsi = resp.s_tmsi & 0xFFFFFFFFFF;
+                //ue->s_tmsi = resp.s_tmsi & 0xFFFFFFFFFF;
 
                 if (ue->state == UE_IDLE && ue->s_tmsi != 0) {
                     // Lần đầu attach → sang REGISTERED
+					ue->s_tmsi = resp.s_tmsi & 0xFFFFFFFFFF; // UE lưu S-TMSI
                     ue->state = UE_REGISTERED;
                     shm->ue_states[ue->idx] = UE_REGISTERED;
 
@@ -155,7 +156,7 @@ void *recv_thread(void *arg) {
 		    ue->next_action_time = 0;
 		   }
                 }
-                else if (ue->state == UE_IDLE && ue->s_tmsi != 0) {
+                else if (ue->state == UE_IDLE && ue->s_tmsi == resp.s_tmsi & 0xFFFFFFFFFFF) {
                     // Response sau khi Paging → sang CONNECTED
                     ue->state = UE_CONNECTED;
                     shm->ue_states[ue->idx] = UE_CONNECTED;
@@ -169,9 +170,12 @@ void *recv_thread(void *arg) {
                     ue->uplink_ready = 1; // bật cờ gửi uplink
                 }
             }
-        } else {
-            usleep(1000);
-        }
+        } 
+		usleep(1000);
+		//else {
+          //  usleep(1000);
+        //}
+			
     }
     return NULL;
 }
