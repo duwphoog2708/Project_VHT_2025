@@ -131,8 +131,8 @@ void *send_thread(void *arg) {
 void *recv_thread(void *arg) {
     UECtx *ue = (UECtx*)arg;
     Message resp;
-    unsigned long long now = current_millis();
     while (ue->state != UE_CONNECTED) {
+		 unsigned long long now = current_millis();
         if (poll_dl_msg(ue->idx, &resp)) {
             if (resp.msgid == MSG_RRC_UE_CONNECTION_RESPONSE) {
                 //ue->s_tmsi = resp.s_tmsi & 0xFFFFFFFFFF;
@@ -183,26 +183,24 @@ void *recv_thread(void *arg) {
 int main() {
     srand(time(NULL));
     init_shm();
-
-	pthread_t tid_send;
-	pthread_t tid_recv;
-    for(int i=0;i<NUM_UE;i++){
-	ue_list[i].idx = i;
-	ue_list[i].tmsi = 452040000000001ULL + i;
-	ue_list[i].s_tmsi =  0;
-	ue_list[i].x = rand_step500();
-//	ue_list[i].service_count = 0;
-	ue_list[i].state =  UE_IDLE;
-	ue_list[i].next_action_time = 0;
+    pthread_t tid_send[NUM_UE], tid_recv[NUM_UE];
+    for (int i = 0; i < NUM_UE; i++) {
+        ue_list[i].idx = i;
+        ue_list[i].tmsi = 452040000000001ULL + i;
+        ue_list[i].s_tmsi = 0;
+        ue_list[i].x = rand_step500();
+        ue_list[i].state = UE_IDLE;
+        ue_list[i].next_action_time = 0;
+        ue_list[i].uplink_ready = 1; // Trigger attach
+        pthread_create(&tid_send[i], NULL, send_thread, &ue_list[i]);
+        pthread_create(&tid_recv[i], NULL, recv_thread, &ue_list[i]);
     }
-    //pthread_t tid_send, tid_recv;
-	for(int i=0;i<NUM_UE;i++){
-    pthread_create(&tid_send, NULL, uplink_thread, &ue_list[i]);
-    pthread_create(&tid_recv, NULL, downlink_thread, &ue_list[i]);
-	}
-	
-    pthread_join(tid_send, NULL);
-    pthread_join(tid_recv, NULL);
+    for (int i = 0; i < NUM_UE; i++) {
+        pthread_join(tid_send[i], NULL);
+        pthread_join(tid_recv[i], NULL);
+    }
+    return 0;
+}
     return 0;
 }
 	
