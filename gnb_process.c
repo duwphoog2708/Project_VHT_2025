@@ -8,20 +8,22 @@
 #include <sys/mman.h>
 #include <fcntl.h>
 #include <time.h>
+#include <sys/select.h>
+#include <errno.h>
 #include <netinet/sctp.h>
 
 #define NUM_UE 200
 #define NUM_AMF 5
 #define SHM_NAME "/5g_sim_shm"
 #define SHM_SIZE (sizeof(SharedMemory))
-#define AMF_BASE_PORT 9101
-#define GNB_PAGING_PORT 9200
+#define GNB_LISTEN_PORT 9100   // gNB listen cho AMF
 
 #define MSG_UE_RRC_CONNECTION_REQUEST 0x10
 #define MSG_RRC_UE_CONNECTION_RESPONSE 0x11
-#define MSG_RRC_UE_PAGING             0x14
 #define MSG_RRC_NGAP_REQ              0x12
 #define MSG_NGAP_RESP                 0x13
+#define MSG_RRC_UE_PAGING             0x14
+
 #define BM_RANDOM_VALUE 0x01
 #define BM_5G_STMSI     0x02
 
@@ -42,25 +44,33 @@ typedef struct {
     int ue_states[NUM_UE];
 } SharedMemory;
 
+typedef struct {
+    int amf_id;
+    int sock_fd;
+} AmfConn;
+
 SharedMemory *shm = NULL;
+AmfConn amf_conns[NUM_AMF];
 
 int ue_to_amf[NUM_UE];
 int amf_counts[NUM_AMF];
 int amf_capacity[NUM_AMF] = {40, 20, 30, 70, 40};
-int amf_current_weight[NUM_AMF];
 int amf_weight[NUM_AMF];
+int amf_current_weight[NUM_AMF];
 
 void init_shm() {
     int fd = shm_open(SHM_NAME, O_RDWR, 0666);
     if (fd < 0) { perror("gNB shm_open"); exit(1); }
     shm = mmap(NULL, SHM_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (shm == MAP_FAILED) { perror("gNB mmap"); exit(1); }
+    close(fd);
 }
 
 int pick_amf_wrr() {
     int total = 0;
     for (int i = 0; i < NUM_AMF; i++) total += amf_weight[i];
     int best_i = -1;
-    int best_val = -2147483648;
+    int best_val = -2147483648;  // INT32_MIN
     for (int i = 0; i < NUM_AMF; i++) {
         amf_current_weight[i] += amf_weight[i];
         if (amf_current_weight[i] > best_val && amf_counts[i] < amf_capacity[i]) {
@@ -81,145 +91,354 @@ int pick_amf_wrr() {
     return best_i;
 }
 
-void *paging_server(void *arg) {
-    int srv = socket(AF_INET, SOCK_STREAM, IPPROTO_SCTP);
-    if (srv < 0) { perror("gNB SCTP socket"); exit(1); }
-    int opt = 1; setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    struct sockaddr_in addr = {0};
-    addr.sin_family = AF_INET; addr.sin_port = htons(GNB_PAGING_PORT); addr.sin_addr.s_addr = INADDR_ANY;
-    if (bind(srv, (struct sockaddr*)&addr, sizeof(addr)) < 0) { perror("gNB SCTP bind"); exit(1); }
-    if (listen(srv, 50) < 0) { perror("gNB SCTP listen"); exit(1); }
+// =============== UPLINK THREAD ===============
+void *uplink_thread(void *arg) {
+    (void)arg;
     while (1) {
-        int c = accept(srv, NULL, NULL);
-        if (c < 0) continue;
-        Message m; int r = sctp_recvmsg(c, &m, sizeof(m), NULL, 0, NULL, NULL);
-        close(c);
-        if (r <= 0) continue;
-        if (m.msgid == MSG_NGAP_RESP) {
-            int uid = m.ue_id;
+        for (int i = 0; i < NUM_UE; i++) {
             pthread_mutex_lock(&shm->mutex);
-            shm->dl[uid].msgid = MSG_RRC_UE_PAGING;
-            shm->dl[uid].bitmask = BM_5G_STMSI;
-            shm->dl[uid].s_tmsi = m.s_tmsi & 0xFFFFFFFFFF; // Mask to 40 bits
-            shm->dl_ready[uid] = 1;
+            if (!shm->ul_ready[i]) {
+                pthread_mutex_unlock(&shm->mutex);
+                continue;
+            }
+            Message m = shm->ul[i];
+            shm->ul_ready[i] = 0;  // clear flag
             pthread_mutex_unlock(&shm->mutex);
+
+            if (m.msgid != MSG_UE_RRC_CONNECTION_REQUEST) continue;
+
+            // chọn AMF cho UE nếu chưa gán
+            int amf = ue_to_amf[i];
+            if (amf < 0) {
+                amf = pick_amf_wrr();
+                if (amf < 0) continue;
+                ue_to_amf[i] = amf;
+                amf_counts[amf]++;
+            }
+
+            // đóng gói NGAP gửi AMF
+            Message ngap = {
+                .msgid  = MSG_RRC_NGAP_REQ,
+                .bitmask= m.bitmask,
+                .ue_id  = i,
+                .tmsi   = m.tmsi,
+                .s_tmsi = m.s_tmsi
+            };
+
+            int fd = amf_conns[amf].sock_fd;
+            if (fd <= 0) {
+                amf_counts[amf]--;
+                ue_to_amf[i] = -1;
+                continue;
+            }
+
+            if (sctp_sendmsg(fd, &ngap, sizeof(ngap),
+                             NULL, 0, 0, 0, 0, 0, 0) < 0) {
+                perror("uplink send");
+                amf_counts[amf]--;
+                ue_to_amf[i] = -1;
+                continue;
+            }
+
+            printf("gNB: Forwarded uplink req from UE%d to AMF%d\n", i, amf + 1);
+        }
+        usleep(1000);
+    }
+    return NULL;
+}
+
+
+// =============== DOWNLINK THREAD ===============
+void *downlink_thread(void *arg) {
+    (void)arg;
+    fd_set readfds;
+    while (1) {
+        FD_ZERO(&readfds);
+        int maxfd = -1;
+        for (int i = 0; i < NUM_AMF; i++) {
+            int fd = amf_conns[i].sock_fd;
+            if (fd > 0) {
+                FD_SET(fd, &readfds);
+                if (fd > maxfd) maxfd = fd;
+            }
+        }
+        if (maxfd < 0) { usleep(1000); continue; }
+
+        if (select(maxfd + 1, &readfds, NULL, NULL, NULL) < 0) continue;
+
+        for (int i = 0; i < NUM_AMF; i++) {
+            int fd = amf_conns[i].sock_fd;
+            if (fd > 0 && FD_ISSET(fd, &readfds)) {
+                Message m;
+                int r = sctp_recvmsg(fd, &m, sizeof(m), NULL, 0, NULL, NULL);
+                if (r <= 0) {
+                    if (r == 0) printf("gNB: AMF%d disconnected\n", i + 1);
+                    close(fd);
+                    amf_conns[i].sock_fd = -1;
+                    continue;
+                }
+
+                if (m.msgid == MSG_NGAP_RESP) {
+                    int uid = m.ue_id;
+                    if (uid < 0 || uid >= NUM_UE) continue;
+
+                    pthread_mutex_lock(&shm->mutex);
+                    shm->dl[uid].msgid   = (m.bitmask & BM_5G_STMSI)
+                                           ? MSG_RRC_UE_CONNECTION_RESPONSE
+                                           : MSG_RRC_UE_PAGING;
+                    shm->dl[uid].bitmask = m.bitmask;
+                    shm->dl[uid].s_tmsi  = m.s_tmsi & 0xFFFFFFFFFF;
+                    shm->dl_ready[uid]   = 1;
+                    pthread_mutex_unlock(&shm->mutex);
+
+                    printf("gNB: Forwarded %s from AMF%d to UE%d\n",
+                           (m.bitmask & BM_5G_STMSI) ? "response" : "paging",
+                           i + 1, uid);
+                }
+            }
         }
     }
     return NULL;
 }
 
-int send_ngap_to_amf(int amf_idx, Message *req, Message *resp) {
-    int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_SCTP);
-    if (sock < 0) { perror("gNB SCTP socket"); return -1; }
-    struct sockaddr_in serv = {0};
-    serv.sin_family = AF_INET;
-    serv.sin_port = htons(AMF_BASE_PORT + amf_idx);
-    serv.sin_addr.s_addr = inet_addr("127.0.0.1");
-    if (connect(sock, (struct sockaddr*)&serv, sizeof(serv)) < 0) { close(sock); return -1; }
-    if (sctp_sendmsg(sock, req, sizeof(*req), NULL, 0, 0, 0, 0, 0, 0) < 0) { close(sock); return -1; }
-    int r = resp ? sctp_recvmsg(sock, resp, sizeof(*resp), NULL, 0, NULL, NULL) : 0;
-    close(sock);
-    return r > 0 || !resp ? 0 : -1;
-}
+// void *uplink_thread(void *arg) {
+//     while (1) {
+//         for (int i = 0; i < NUM_UE; i++) {
+//             pthread_mutex_lock(&shm->mutex);
+//             if (!shm->ul_ready[i]) {
+//                 pthread_mutex_unlock(&shm->mutex);
+//                 continue;
+//             }
+//             Message m = shm->ul[i];
+//             shm->ul_ready[i] = 0;
+//             pthread_mutex_unlock(&shm->mutex);
 
+//             if (m.msgid != MSG_UE_RRC_CONNECTION_REQUEST) continue;
+
+//             int amf = ue_to_amf[i];
+//             if (amf < 0) {
+//                 amf = pick_amf_wrr();
+//                 if (amf < 0) continue;
+//                 ue_to_amf[i] = amf;
+//                 amf_counts[amf]++;
+//             }
+
+//             Message ngap = { .msgid = MSG_RRC_NGAP_REQ, .bitmask = m.bitmask, .ue_id = i, .tmsi = m.tmsi, .s_tmsi = m.s_tmsi };
+//             Message resp;
+//             struct timeval tv = { .tv_sec = 5, .tv_usec = 0 };  // 5s timeout
+//             fd_set rfds;
+//             FD_ZERO(&rfds);
+//             FD_SET(amf_conns[amf].sock_fd, &rfds);
+//             if (sctp_sendmsg(amf_conns[amf].sock_fd, &ngap, sizeof(ngap),
+//                              NULL, 0, 0, 0, 0, 0, 0) < 0) {
+//                 perror("uplink send");
+//                 amf_counts[amf]--;
+//                 ue_to_amf[i] = -1;
+//                 continue;
+//             }
+//             if (select(amf_conns[amf].sock_fd + 1, &rfds, NULL, NULL, &tv) > 0) {
+//                 if (sctp_recvmsg(amf_conns[amf].sock_fd, &resp, sizeof(resp), NULL, 0, NULL, NULL) > 0 && resp.msgid == MSG_NGAP_RESP) {
+//                     pthread_mutex_lock(&shm->mutex);
+//                     shm->dl[i].msgid = MSG_RRC_UE_CONNECTION_RESPONSE;
+//                     shm->dl[i].bitmask = resp.bitmask;
+//                     shm->dl[i].s_tmsi = resp.s_tmsi & 0xFFFFFFFFFF;
+//                     shm->dl_ready[i] = 1;
+//                     shm->ue_states[i] = (m.bitmask & BM_5G_STMSI) ? 2 : 1;  // CONNECTED if service, else REGISTERED
+//                     pthread_mutex_unlock(&shm->mutex);
+//                     printf("gNB: Forwarded response to UE%d, state=%d\n", i, shm->ue_states[i]);
+//                 } else {
+//                     amf_counts[amf]--;
+//                     ue_to_amf[i] = -1;
+//                 }
+//             } else {
+//                 amf_counts[amf]--;
+//                 ue_to_amf[i] = -1;
+//             }
+//         }
+//         usleep(1000);
+//     }
+//     return NULL;
+// }
+
+// // =============== DOWNLINK THREAD ===============
+// void *downlink_thread(void *arg) {
+//     fd_set readfds;
+//     while (1) {
+//         FD_ZERO(&readfds);
+//         int maxfd = -1;
+//         for (int i = 0; i < NUM_AMF; i++) {
+//             int fd = amf_conns[i].sock_fd;
+//             if (fd > 0) {
+//                 FD_SET(fd, &readfds);
+//                 if (fd > maxfd) maxfd = fd;
+//             }
+//         }
+//         if (maxfd < 0) { usleep(1000); continue; }
+
+//         if (select(maxfd + 1, &readfds, NULL, NULL, NULL) < 0) continue;
+
+//         for (int i = 0; i < NUM_AMF; i++) {
+//             int fd = amf_conns[i].sock_fd;
+//             if (fd > 0 && FD_ISSET(fd, &readfds)) {
+//                 Message m;
+//                 int r = sctp_recvmsg(fd, &m, sizeof(m), NULL, 0, NULL, NULL);
+//                 if (r <= 0) {
+//                     if (r == 0) printf("gNB: AMF%d disconnected\n", i + 1);
+//                     close(fd);
+//                     amf_conns[i].sock_fd = -1;
+//                     continue;
+//                 }
+//                 if (m.msgid == MSG_NGAP_RESP) {
+//                     int uid = m.ue_id;
+//                     if (uid < 0 || uid >= NUM_UE) continue;
+//                     pthread_mutex_lock(&shm->mutex);
+//                     shm->dl[uid].msgid = (m.bitmask & BM_5G_STMSI) ? MSG_RRC_UE_CONNECTION_RESPONSE : MSG_RRC_UE_PAGING;
+//                     shm->dl[uid].bitmask = m.bitmask;
+//                     shm->dl[uid].s_tmsi = m.s_tmsi & 0xFFFFFFFFFF;
+//                     shm->dl_ready[uid] = 1;
+//                     if (!(m.bitmask & BM_5G_STMSI)) shm->ue_states[uid] = 1;  // REGISTERED for initial
+//                     pthread_mutex_unlock(&shm->mutex);
+//                     printf("gNB: Forwarded %s to UE%d from AMF%d\n",
+//                            (m.bitmask & BM_5G_STMSI) ? "response" : "paging", uid, i + 1);
+//                 }
+//             }
+//         }
+//     }
+//     return NULL;
+// }
+
+// =============== MAIN ===============
 int main() {
     srand(time(NULL));
     init_shm();
+
     for (int i = 0; i < NUM_AMF; i++) {
         amf_weight[i] = amf_capacity[i];
         amf_current_weight[i] = 0;
         amf_counts[i] = 0;
+        amf_conns[i].amf_id = i;
+        amf_conns[i].sock_fd = -1;
     }
     for (int i = 0; i < NUM_UE; i++) ue_to_amf[i] = -1;
 
-    pthread_t t; pthread_create(&t, NULL, paging_server, NULL);
+    // SCTP server
+    int listen_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_SCTP);
+    if (listen_fd < 0) { perror("gNB SCTP socket"); exit(1); }
 
-    int handled_initial = 0;
+    struct sockaddr_in addr = {0};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(GNB_LISTEN_PORT);
+    addr.sin_addr.s_addr = INADDR_ANY;
+
+    int opt = 1;
+    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    if (bind(listen_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        perror("gNB SCTP bind"); exit(1);
+    }
+    if (listen(listen_fd, NUM_AMF) < 0) {
+        perror("gNB SCTP listen"); exit(1);
+    }
+    printf("gNB: Listening for AMFs on port %d...\n", GNB_LISTEN_PORT);
+
+    // Accept AMF connections
+    // for (int i = 0; i < NUM_AMF; i++) {
+    //     int conn_fd = accept(listen_fd, NULL, NULL);
+    //     if (conn_fd < 0) { perror("gNB accept"); exit(1); }
+
+    //     struct sctp_status status;
+    //     socklen_t optlen = sizeof(status);
+    //     if (getsockopt(conn_fd, IPPROTO_SCTP, SCTP_STATUS, &status, &optlen) < 0) {
+    //         perror("getsockopt SCTP_STATUS"); close(conn_fd); continue;
+    //     }
+
+    //     int peel_fd = sctp_peeloff(listen_fd, status.sstat_assoc_id);
+    //     if (peel_fd < 0) { perror("sctp_peeloff"); close(conn_fd); continue; }
+
+    //     amf_conns[i].sock_fd = peel_fd;
+    //     printf("gNB: AMF%d connected on socket %d\n", i+1, peel_fd);
+    // }
+    
+     // Accept AMF connections (theo bất kỳ thứ tự nào)
+    int connected_amf = 0;
+    while (connected_amf < NUM_AMF) {
+        int conn_fd = accept(listen_fd, NULL, NULL);
+        if (conn_fd < 0) {
+            perror("gNB accept");
+            continue;
+        }
+
+        struct sctp_status status;
+        socklen_t optlen = sizeof(status);
+        if (getsockopt(conn_fd, IPPROTO_SCTP, SCTP_STATUS, &status, &optlen) < 0) {
+            perror("getsockopt SCTP_STATUS");
+            close(conn_fd);
+            continue;
+        }
+
+        int peel_fd = sctp_peeloff(listen_fd, status.sstat_assoc_id);
+        if (peel_fd < 0) {
+            perror("sctp_peeloff");
+            close(conn_fd);
+            continue;
+        }
+
+        // Gán vào slot trống đầu tiên
+        int slot = -1;
+        for (int i = 0; i < NUM_AMF; i++) {
+            if (amf_conns[i].sock_fd < 0) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot >= 0) {
+            amf_conns[slot].sock_fd = peel_fd;
+            printf("gNB: AMF%d connected on socket %d\n", slot + 1, peel_fd);
+            connected_amf++;
+        } else {
+            printf("gNB: Too many AMFs connected, closing extra\n");
+            close(peel_fd);
+        }
+    }
+
+    // Create uplink + downlink threads
+    pthread_t tid_ul, tid_dl;
+    pthread_create(&tid_ul, NULL, uplink_thread, NULL);
+    pthread_create(&tid_dl, NULL, downlink_thread, NULL);
+
+    // Monitor loop
     while (1) {
+        int connected = 0;
         pthread_mutex_lock(&shm->mutex);
         for (int i = 0; i < NUM_UE; i++) {
+            if (shm->ue_states[i] == 2) connected++;
             if (shm->ue_states[i] == 0 && ue_to_amf[i] >= 0) {
-                amf_counts[ue_to_amf[i]]--;
+                int amf = ue_to_amf[i];
+                amf_counts[amf]--;
                 ue_to_amf[i] = -1;
             }
         }
         pthread_mutex_unlock(&shm->mutex);
 
-        for (int i = 0; i < NUM_UE; i++) {
-            int do_process = 0;
-            pthread_mutex_lock(&shm->mutex);
-            if (shm->ul_ready[i]) { do_process = 1; }
-            pthread_mutex_unlock(&shm->mutex);
-            if (!do_process) continue;
-
-            Message m;
-            pthread_mutex_lock(&shm->mutex);
-            m = shm->ul[i];
-            shm->ul_ready[i] = 0;
-            pthread_mutex_unlock(&shm->mutex);
-
-            if (m.msgid == MSG_UE_RRC_CONNECTION_REQUEST) {
-                if (m.bitmask & BM_RANDOM_VALUE) {
-                    int amf = pick_amf_wrr();
-                    if (amf < 0) continue;
-                    ue_to_amf[i] = amf;
-                    amf_counts[amf]++;
-                    Message ngap = {0};
-                    ngap.msgid = MSG_RRC_NGAP_REQ;
-                    ngap.bitmask = BM_RANDOM_VALUE;
-                    ngap.ue_id = i;
-                    ngap.tmsi = m.tmsi;
-                    Message ngap_resp = {0};
-                    if (send_ngap_to_amf(amf, &ngap, &ngap_resp) == 0) {
-                        pthread_mutex_lock(&shm->mutex);
-                        shm->dl[i].msgid = MSG_RRC_UE_CONNECTION_RESPONSE;
-                        shm->dl[i].bitmask = ngap_resp.bitmask;
-                        shm->dl[i].s_tmsi = ngap_resp.s_tmsi & 0xFFFFFFFFFF; // Mask to 40 bits
-                        shm->dl_ready[i] = 1;
-                        shm->ue_states[i] = 1;
-                        pthread_mutex_unlock(&shm->mutex);
-                        handled_initial++;
-                    }
-                } else if (m.bitmask & BM_5G_STMSI) {
-                    int amf = ue_to_amf[i];
-                    if (amf < 0) {
-                        amf = pick_amf_wrr();
-                        if (amf < 0) continue;
-                        ue_to_amf[i] = amf;
-                        amf_counts[amf]++;
-                    }
-                    Message ngap = {0};
-                    ngap.msgid = MSG_RRC_NGAP_REQ;
-                    ngap.bitmask = BM_5G_STMSI;
-                    ngap.ue_id = i;
-                    ngap.tmsi = m.tmsi;
-                    ngap.s_tmsi = m.s_tmsi;
-                    Message ngap_resp = {0};
-                    send_ngap_to_amf(amf, &ngap, &ngap_resp);
-                    pthread_mutex_lock(&shm->mutex);
-                    shm->dl[i].msgid = MSG_RRC_UE_CONNECTION_RESPONSE;
-                    shm->dl_ready[i] = 1;
-                    shm->ue_states[i] = (shm->ue_states[i] == 2) ? 2 : 1;
-                    pthread_mutex_unlock(&shm->mutex);
-                }
-            }
+        printf("gNB: Connected=%d\n", connected);
+        for (int i = 0; i < NUM_AMF; i++) {
+            printf("  AMF%d: %d/%d\n", i+1, amf_counts[i], amf_capacity[i]);
         }
-
-        int connected = 0;
-        pthread_mutex_lock(&shm->mutex);
-        for (int i = 0; i < NUM_UE; i++) if (shm->ue_states[i] == 2) connected++;
-        pthread_mutex_unlock(&shm->mutex);
-        if (connected == NUM_UE && handled_initial >= NUM_UE) {
-            printf("gNB: all UE CONNECTED. distribution:\n");
-            for (int k = 0; k < NUM_AMF; k++) {
-                printf("AMF%d: %d UEs (%.2f%%)\n", k+1, amf_counts[k], (float)amf_counts[k]/NUM_UE*100.0f);
-            }
-            Message term = { .msgid = 0xFF };
-            for (int i = 0; i < NUM_AMF; i++) send_ngap_to_amf(i, &term, NULL);
+        if (connected >= NUM_UE) {
+            printf("gNB: All UEs connected, exiting\n");
             break;
         }
-        usleep(2000);
+        sleep(1);
     }
 
+    // Cleanup
+    Message term = { .msgid = 0xFF };
+    for (int i = 0; i < NUM_AMF; i++) {
+        if (amf_conns[i].sock_fd > 0) {
+            sctp_sendmsg(amf_conns[i].sock_fd, &term, sizeof(term), NULL, 0, 0, 0, 0, 0, 0);
+            close(amf_conns[i].sock_fd);
+        }
+    }
+    close(listen_fd);
     return 0;
 }
