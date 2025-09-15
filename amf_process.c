@@ -7,15 +7,18 @@
 #include <arpa/inet.h>
 #include <time.h>
 #include <netinet/sctp.h>
+#include <sys/time.h>
 
-#define AMF_BASE_PORT 9101
-#define GNB_PAGING_PORT 9200
+#define NUM_AMF 5
 #define NUM_UE 200
+#define GNB_PORT 9100
+#define GNB_IP "127.0.0.1"
 
 #define MSG_RRC_NGAP_REQ 0x12
-#define MSG_NGAP_RESP     0x13
-#define BM_RANDOM_VALUE 0x01
-#define BM_5G_STMSI     0x02
+#define MSG_NGAP_RESP    0x13
+#define MSG_PAGING       0xFF
+#define BM_RANDOM_VALUE  0x01
+#define BM_5G_STMSI      0x02
 
 typedef struct {
     uint8_t msgid;
@@ -25,103 +28,158 @@ typedef struct {
     uint64_t s_tmsi;
 } Message;
 
-int amf_index_global;
-int capacity_global;
-int current_load = 0;
-uint16_t registered_ues[NUM_UE] = {0};
+typedef struct {
+    int amf_id;
+    int capacity;
+    int current_load;
+    int sock_fd;
+    uint16_t registered_ues[NUM_UE];
+    uint64_t ue_s_tmsi[NUM_UE];
+} AMF;
 
-void send_paging_to_gnb(Message *paging) {
-    int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_SCTP);
-    if (sock < 0) { perror("AMF SCTP socket"); return; }
-    struct sockaddr_in serv = {0};
-    serv.sin_family = AF_INET;
-    serv.sin_port = htons(GNB_PAGING_PORT);
-    serv.sin_addr.s_addr = inet_addr("127.0.0.1");
-    if (connect(sock, (struct sockaddr*)&serv, sizeof(serv)) < 0) { close(sock); return; }
-    sctp_sendmsg(sock, paging, sizeof(*paging), NULL, 0, 0, 0, 0, 0, 0);
-    close(sock);
+AMF amfs[NUM_AMF];
+pthread_mutex_t send_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void print_current_time() {
+    struct timeval tv;
+    struct tm* tm_info;
+    gettimeofday(&tv, NULL);
+    char buff[64];
+    tm_info = localtime(&tv.tv_sec);
+    strftime(buff, sizeof(buff), "%Y-%m-%d %H-%M-%S", tm_info);
+    printf("[Time] %s:%06ld\n", buff, tv.tv_usec);
 }
 
-// New function to handle the paging thread
-void *send_paging_thread(void *arg) {
-    Message *p = (Message *)arg;
-    int rnds[6] = {500, 1000, 1500, 2000, 2500, 3000};
-    int y = rnds[rand() % 6];
-    usleep(y * 1000);
-    send_paging_to_gnb(p);
-    free(p);
-    return NULL;
-}
+void *paging_thread(void *arg) {
+    while (1) {
+        usleep(5000 * 1000); // gửi paging mỗi 5 giây
+        Message paging = {0};
+        paging.msgid = MSG_PAGING;
+        paging.bitmask = BM_5G_STMSI;
+        paging.ue_id = 0xFFFF; // broadcast
+        strcpy((char*) &paging.s_tmsi, "PAGING");
 
-void *handle_connection(void *arg) {
-    int fd = *(int*)arg;
-    free(arg);
-    Message req;
-    int r = sctp_recvmsg(fd, &req, sizeof(req), NULL, 0, NULL, NULL);
-    if (r <= 0) { close(fd); return NULL; }
-
-    if (req.msgid == MSG_RRC_NGAP_REQ) {
-        if (req.bitmask & BM_RANDOM_VALUE && current_load < capacity_global) {
-            uint64_t s = ((uint64_t)(amf_index_global & 0x3FF) << 30) | // Set ID (10 bits)
-                         ((uint64_t)(amf_index_global & 0x3F) << 24) | // Pointer (6 bits)
-                         (req.tmsi & 0xFFFFFF); // TMSI (24 bits)
-            Message resp = {0};
-            resp.msgid = MSG_NGAP_RESP;
-            resp.bitmask = BM_RANDOM_VALUE;
-            resp.ue_id = req.ue_id;
-            resp.tmsi = req.tmsi;
-            resp.s_tmsi = s;
-            sctp_sendmsg(fd, &resp, sizeof(resp), NULL, 0, 0, 0, 0, 0, 0);
-            if (!registered_ues[req.ue_id]) {
-                registered_ues[req.ue_id] = 1;
-                current_load++;
-                printf("AMF%d: current load = %d (%.2f%%)\n", amf_index_global+1, current_load, (float)current_load/NUM_UE*100.0f);
+        pthread_mutex_lock(&send_mutex);
+        for (int i = 0; i < NUM_AMF; i++) {
+            if (amfs[i].sock_fd > 0) {
+                int r = sctp_sendmsg(amfs[i].sock_fd, &paging, sizeof(paging),
+                                     NULL, 0, 0, 0, 0, 0, 0);
+                if (r > 0) {
+                    printf("AMF%d: Sent Paging to gNB\n", i+1);
+                }
             }
-            Message paging = {0};
-            paging.msgid = MSG_NGAP_RESP;
-            paging.bitmask = BM_5G_STMSI;
-            paging.ue_id = req.ue_id;
-            paging.s_tmsi = s;
-            pthread_t t;
-            Message *mp = malloc(sizeof(Message));
-            *mp = paging;
-            pthread_create(&t, NULL, send_paging_thread, mp);
-            pthread_detach(t);
-        } else if (req.bitmask & BM_5G_STMSI) {
-            Message resp = {0};
-            resp.msgid = MSG_NGAP_RESP;
-            resp.bitmask = BM_5G_STMSI;
-            resp.ue_id = req.ue_id;
-            sctp_sendmsg(fd, &resp, sizeof(resp), NULL, 0, 0, 0, 0, 0, 0);
         }
-    } else if (req.msgid == 0xFF) {
-        printf("AMF%d final: %d UEs (%.2f%%)\n", amf_index_global+1, current_load, (float)current_load/NUM_UE*100.0f);
+        pthread_mutex_unlock(&send_mutex);
     }
-    close(fd);
     return NULL;
+}
+
+void *amf_thread(void *arg) {
+    AMF *a = (AMF *)arg;
+
+    // Kết nối đến gNB
+    int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_SCTP);
+    if (sock < 0) { perror("socket"); pthread_exit(NULL); }
+
+    struct sockaddr_in gnb_addr = {0};
+    gnb_addr.sin_family = AF_INET;
+    gnb_addr.sin_port = htons(GNB_PORT);
+    inet_pton(AF_INET, GNB_IP, &gnb_addr.sin_addr);
+
+    if (connect(sock, (struct sockaddr*)&gnb_addr, sizeof(gnb_addr)) < 0) {
+        perror("connect gNB");
+        close(sock);
+        pthread_exit(NULL);
+    }
+
+    a->sock_fd = sock;
+    printf("AMF%d: Connected to gNB on socket %d (cap=%d)\n",
+           a->amf_id+1, sock, a->capacity);
+
+    // Vòng lặp xử lý bản tin
+    while (1) {
+        Message req;
+        int r = sctp_recvmsg(sock, &req, sizeof(req), NULL, 0, NULL, NULL);
+        if (r <= 0) {
+            printf("AMF%d: gNB closed connection\n", a->amf_id+1);
+            break;
+        }
+
+        if (req.msgid == MSG_RRC_NGAP_REQ) {
+            if (req.bitmask & BM_RANDOM_VALUE && a->current_load < a->capacity) {
+                uint64_t s = ((uint64_t)(a->amf_id & 0x3FF) << 30) |
+                             ((uint64_t)(a->amf_id & 0x3F) << 24) |
+                             (req.tmsi & 0xFFFFFF);
+
+                Message resp = {0};
+                resp.msgid = MSG_NGAP_RESP;
+                resp.bitmask = BM_RANDOM_VALUE;
+                resp.ue_id = req.ue_id;
+                resp.tmsi = req.tmsi;
+                resp.s_tmsi = s;
+
+                a->ue_s_tmsi[req.ue_id] = s;
+                sctp_sendmsg(sock, &resp, sizeof(resp), NULL, 0, 0, 0, 0, 0, 0);
+
+                if (!a->registered_ues[req.ue_id]) {
+                    a->registered_ues[req.ue_id] = 1;
+                    a->current_load++;
+                    print_current_time();
+                    printf("AMF%d: current load = %d (%.2f%%)\n",
+                           a->amf_id+1, a->current_load,
+                           (float)a->current_load/NUM_UE*100.0f);
+                }
+            } else if (req.bitmask & BM_5G_STMSI) {
+                Message resp = {0};
+                resp.msgid = MSG_NGAP_RESP;
+                resp.bitmask = BM_5G_STMSI;
+                resp.ue_id = req.ue_id;
+                if (a->ue_s_tmsi[req.ue_id] == 0) {
+                    uint64_t s = ((uint64_t)(a->amf_id & 0x3FF) << 30) |
+                                 ((uint64_t)(a->amf_id & 0x3F) << 24) |
+                                 (req.tmsi & 0xFFFFFF);
+                    a->ue_s_tmsi[req.ue_id] = s;
+                }
+                resp.s_tmsi = a->ue_s_tmsi[req.ue_id];
+                sctp_sendmsg(sock, &resp, sizeof(resp), NULL, 0, 0, 0, 0, 0, 0);
+            }
+        } else if (req.msgid == MSG_PAGING) {
+            printf("AMF%d final: %d UEs (%.2f%%)\n", a->amf_id+1,
+                   a->current_load,
+                   (float)a->current_load/NUM_UE*100.0f);
+        }
+    }
+
+    close(sock);
+    a->sock_fd = -1;
+    pthread_exit(NULL);
 }
 
 int main(int argc, char **argv) {
-    if (argc < 3) { printf("Usage: %s <amf_index 1..5> <capacity>\n", argv[0]); return 1; }
-    amf_index_global = atoi(argv[1]) - 1;
-    capacity_global = atoi(argv[2]);
-    srand(time(NULL) ^ amf_index_global);
-
-    int srv = socket(AF_INET, SOCK_STREAM, IPPROTO_SCTP);
-    if (srv < 0) { perror("AMF SCTP socket"); return 1; }
-    int opt = 1; setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    struct sockaddr_in addr = {0};
-    addr.sin_family = AF_INET; addr.sin_port = htons(AMF_BASE_PORT + amf_index_global); addr.sin_addr.s_addr = INADDR_ANY;
-    if (bind(srv, (struct sockaddr*)&addr, sizeof(addr)) < 0) { perror("AMF SCTP bind"); return 1; }
-    if (listen(srv, 50) < 0) { perror("AMF SCTP listen"); return 1; }
-    printf("AMF%d listening on %d (cap=%d)\n", amf_index_global+1, AMF_BASE_PORT + amf_index_global, capacity_global);
-
-    while (1) {
-        int *cfd = malloc(sizeof(int));
-        *cfd = accept(srv, NULL, NULL);
-        if (*cfd < 0) { free(cfd); continue; }
-        pthread_t t; pthread_create(&t, NULL, handle_connection, cfd); pthread_detach(t);
+    if (argc < 6) {
+        printf("Usage: %s <cap1> <cap2> <cap3> <cap4> <cap5>\n", argv[0]);
+        return 1;
     }
-    close(srv);
+
+    pthread_t tids[NUM_AMF];
+    for (int i = 0; i < NUM_AMF; i++) {
+        amfs[i].amf_id = i;
+        amfs[i].capacity = atoi(argv[i+1]);
+        amfs[i].current_load = 0;
+        memset(amfs[i].registered_ues, 0, sizeof(amfs[i].registered_ues));
+        memset(amfs[i].ue_s_tmsi, 0, sizeof(amfs[i].ue_s_tmsi));
+        if (pthread_create(&tids[i], NULL, amf_thread, &amfs[i]) != 0) {
+            perror("pthread_create AMF");
+            exit(1);
+        }
+    }
+
+    // Thread gửi Paging định kỳ
+    pthread_t tid_paging;
+    pthread_create(&tid_paging, NULL, paging_thread, NULL);
+
+    for (int i = 0; i < NUM_AMF; i++) pthread_join(tids[i], NULL);
+    pthread_join(tid_paging, NULL);
+
     return 0;
 }
