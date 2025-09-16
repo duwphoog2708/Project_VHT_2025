@@ -28,6 +28,12 @@
 #define BM_RANDOM_VALUE 0x01
 #define BM_5G_STMSI     0x02
 
+
+enum UE_State{
+    UE_IDLE,
+    UE_REGISTERED,
+    UE_CONNECTED
+};
 typedef struct {
     uint8_t msgid;
     uint8_t bitmask;
@@ -178,157 +184,51 @@ void *downlink_thread(void *arg) {
                     amf_conns[i].sock_fd = -1;
                     continue;
                 }
-
-                if (m.msgid == MSG_NGAP_RESP || m.msgid == MSG_NGAP_RRC_PAGING){
+                if (m.msgid == MSG_NGAP_RESP || m.msgid == MSG_NGAP_RRC_PAGING) {
                     int uid = m.ue_id;
-                    if (uid < 0 || uid >= NUM_UE) continue;
-
+                    if (uid < 0 || uid >= NUM_UE) {
+                        printf("gNB: Invalid UE ID %d from AMF%d, ignoring\n", uid, i + 1);
+                        continue;
+                    }
                     pthread_mutex_lock(&shm->mutex);
-                    shm->dl[uid].msgid   = ;
+                    if (m.msgid == MSG_NGAP_RESP) {
+                    shm->dl[uid].msgid = (m.bitmask & BM_5G_STMSI)
+                             ? MSG_RRC_UE_CONNECTION_RESPONSE
+                             : MSG
+                    //shm->ue_states[uid] = (m.bitmask & BM_5G_STMSI) ? 2 : 1; // CONNECTED or REGISTERED
+                    } else if (m.msgid == MSG_NGAP_RRC_PAGING) {
+                            shm->dl[uid].msgid = MSG_RRC_UE_PAGING; // Luôn là paging
+                            shm->ue_states[uid] = 1; // REGISTERED cho paging
+                    }
                     shm->dl[uid].bitmask = m.bitmask;
-                    shm->dl[uid].s_tmsi  = m.s_tmsi & 0xFFFFFFFFFF;
-                    shm->dl_ready[uid]   = 1;
+                    shm->dl[uid].s_tmsi = m.s_tmsi & 0xFFFFFFFFFF;
+                    shm->dl_ready[uid] = 1;
                     pthread_mutex_unlock(&shm->mutex);
+                        // printf("gNB: Forwarded %s from AMF%d to UE%d\n",
+                           //(shm->dl[uid].msgid == MSG_RRC_UE_CONNECTION_RESPONSE) ? "response" : "paging",
+                             //    i + 1, uid);
+               }
+                // if (m.msgid == MSG_NGAP_RESP || m.msgid == MSG_NGAP_RRC_PAGING){
+                //     int uid = m.ue_id;
+                //     if (uid < 0 || uid >= NUM_UE) continue;
 
-                    printf("gNB: Forwarded %s from AMF%d to UE%d\n",
-                           (m.bitmask & BM_5G_STMSI) ? "response" : "paging",
-                           i + 1, uid);
-                }
+                //     pthread_mutex_lock(&shm->mutex);
+                //     shm->dl[uid].msgid   = ;
+                //     shm->dl[uid].bitmask = m.bitmask;
+                //     shm->dl[uid].s_tmsi  = m.s_tmsi & 0xFFFFFFFFFF;
+                //     shm->dl_ready[uid]   = 1;
+                //     pthread_mutex_unlock(&shm->mutex);
+
+                //     printf("gNB: Forwarded %s from AMF%d to UE%d\n",
+                //            (m.bitmask & BM_5G_STMSI) ? "response" : "paging",
+                //            i + 1, uid);
+                // }
             }
         }
     }
     return NULL;
 }
 
-// void *uplink_thread(void *arg) {
-//     while (1) {
-//         for (int i = 0; i < NUM_UE; i++) {
-//             pthread_mutex_lock(&shm->mutex);
-//             if (!shm->ul_ready[i]) {
-//                 pthread_mutex_unlock(&shm->mutex);
-//                 continue;
-//             }
-//             Message m = shm->ul[i];
-//             shm->ul_ready[i] = 0;
-//             pthread_mutex_unlock(&shm->mutex);
-
-//             if (m.msgid != MSG_UE_RRC_CONNECTION_REQUEST) continue;
-
-//             int amf = ue_to_amf[i];
-//             if (amf < 0) {
-//                 amf = pick_amf_wrr();
-//                 if (amf < 0) continue;
-//                 ue_to_amf[i] = amf;
-//                 amf_counts[amf]++;
-//             }
-
-//             Message ngap = { .msgid = MSG_RRC_NGAP_REQ, .bitmask = m.bitmask, .ue_id = i, .tmsi = m.tmsi, .s_tmsi = m.s_tmsi };
-//             Message resp;
-//             struct timeval tv = { .tv_sec = 5, .tv_usec = 0 };  // 5s timeout
-//             fd_set rfds;
-//             FD_ZERO(&rfds);
-//             FD_SET(amf_conns[amf].sock_fd, &rfds);
-//             if (sctp_sendmsg(amf_conns[amf].sock_fd, &ngap, sizeof(ngap),
-//                              NULL, 0, 0, 0, 0, 0, 0) < 0) {
-//                 perror("uplink send");
-//                 amf_counts[amf]--;
-//                 ue_to_amf[i] = -1;
-//                 continue;
-//             }
-//             if (select(amf_conns[amf].sock_fd + 1, &rfds, NULL, NULL, &tv) > 0) {
-//                 if (sctp_recvmsg(amf_conns[amf].sock_fd, &resp, sizeof(resp), NULL, 0, NULL, NULL) > 0 && resp.msgid == MSG_NGAP_RESP) {
-//                     pthread_mutex_lock(&shm->mutex);
-//                     shm->dl[i].msgid = MSG_RRC_UE_CONNECTION_RESPONSE;
-//                     shm->dl[i].bitmask = resp.bitmask;
-//                     shm->dl[i].s_tmsi = resp.s_tmsi & 0xFFFFFFFFFF;
-//                     shm->dl_ready[i] = 1;
-//                     shm->ue_states[i] = (m.bitmask & BM_5G_STMSI) ? 2 : 1;  // CONNECTED if service, else REGISTERED
-//                     pthread_mutex_unlock(&shm->mutex);
-//                     printf("gNB: Forwarded response to UE%d, state=%d\n", i, shm->ue_states[i]);
-//                 } else {
-//                     amf_counts[amf]--;
-//                     ue_to_amf[i] = -1;
-//                 }
-//             } else {
-//                 amf_counts[amf]--;
-//                 ue_to_amf[i] = -1;
-//             }
-//         }
-//         usleep(1000);
-//     }
-//     return NULL;
-// }
-
-// // =============== DOWNLINK THREAD ===============
-// void *downlink_thread(void *arg) {
-//     fd_set readfds;
-//     while (1) {
-//         FD_ZERO(&readfds);
-//         int maxfd = -1;
-//         for (int i = 0; i < NUM_AMF; i++) {
-//             int fd = amf_conns[i].sock_fd;
-//             if (fd > 0) {
-//                 FD_SET(fd, &readfds);
-//                 if (fd > maxfd) maxfd = fd;
-//             }
-//         }
-//         if (maxfd < 0) { usleep(1000); continue; }
-
-//         if (select(maxfd + 1, &readfds, NULL, NULL, NULL) < 0) continue;
-
-//         for (int i = 0; i < NUM_AMF; i++) {
-//             int fd = amf_conns[i].sock_fd;
-//             if (fd > 0 && FD_ISSET(fd, &readfds)) {
-//                 Message m;
-//                 int r = sctp_recvmsg(fd, &m, sizeof(m), NULL, 0, NULL, NULL);
-//                 if (r <= 0) {
-//                     if (r == 0) printf("gNB: AMF%d disconnected\n", i + 1);
-//                     close(fd);
-//                     amf_conns[i].sock_fd = -1;
-//                     continue;
-//                 }
-                   if (m.msgid == MSG_NGAP_RESP || m.msgid == MSG_NGAP_RRC_PAGING) {
-    int uid = m.ue_id;
-    if (uid < 0 || uid >= NUM_UE) {
-        printf("gNB: Invalid UE ID %d from AMF%d, ignoring\n", uid, i + 1);
-        continue;
-    }
-    pthread_mutex_lock(&shm->mutex);
-    if (m.msgid == MSG_NGAP_RESP) {
-        shm->dl[uid].msgid = (m.bitmask & BM_5G_STMSI)
-                             ? MSG_RRC_UE_CONNECTION_RESPONSE
-                             : MSG_RRC_UE_PAGING;
-        shm->ue_states[uid] = (m.bitmask & BM_5G_STMSI) ? 2 : 1; // CONNECTED or REGISTERED
-    } else if (m.msgid == MSG_NGAP_RRC_PAGING) {
-        shm->dl[uid].msgid = MSG_RRC_UE_PAGING; // Luôn là paging
-        shm->ue_states[uid] = 1; // REGISTERED cho paging
-    }
-    shm->dl[uid].bitmask = m.bitmask;
-    shm->dl[uid].s_tmsi = m.s_tmsi & 0xFFFFFFFFFF;
-    shm->dl_ready[uid] = 1;
-    pthread_mutex_unlock(&shm->mutex);
-    printf("gNB: Forwarded %s from AMF%d to UE%d\n",
-           (shm->dl[uid].msgid == MSG_RRC_UE_CONNECTION_RESPONSE) ? "response" : "paging",
-           i + 1, uid);
-}
-                // if (m.msgid == MSG_NGAP_RESP) {
-                //     int uid = m.ue_id;
-                //     if (uid < 0 || uid >= NUM_UE) continue;
-                //     pthread_mutex_lock(&shm->mutex);
-                //     shm->dl[uid].msgid = (m.bitmask & BM_5G_STMSI) ? MSG_RRC_UE_CONNECTION_RESPONSE : MSG_RRC_UE_PAGING;
-                //     shm->dl[uid].bitmask = m.bitmask;
-                //     shm->dl[uid].s_tmsi = m.s_tmsi & 0xFFFFFFFFFF;
-                //     shm->dl_ready[uid] = 1;
-                //     if (!(m.bitmask & BM_5G_STMSI)) shm->ue_states[uid] = 1;  // REGISTERED for initial
-                //     pthread_mutex_unlock(&shm->mutex);
-                //     printf("gNB: Forwarded %s to UE%d from AMF%d\n",
-                //            (m.bitmask & BM_5G_STMSI) ? "response" : "paging", uid, i + 1);
-                // }
-//             }
-//         }
-//     }
-//     return NULL;
-// }
 
 // =============== MAIN ===============
 int main() {
@@ -434,8 +334,8 @@ int main() {
         int connected = 0;
         pthread_mutex_lock(&shm->mutex);
         for (int i = 0; i < NUM_UE; i++) {
-            if (shm->ue_states[i] == 2) connected++;
-            if (shm->ue_states[i] == 0 && ue_to_amf[i] >= 0) {
+            if (shm->ue_states[i] == UE_CONNECTED) connected++;
+            if (shm->ue_states[i] == UE_IDLE && ue_to_amf[i] >= 0) {
                 int amf = ue_to_amf[i];
                 amf_counts[amf]--;
                 ue_to_amf[i] = -1;
