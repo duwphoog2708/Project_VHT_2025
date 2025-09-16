@@ -178,7 +178,7 @@ void *downlink_thread(void *arg) {
                     continue;
                 }
 
-                if (m.msgid == MSG_NGAP_RESP) {
+                if (m.msgid == MSG_NGAP_RESP || m.msgid == MSG_RRC_UE_PAGING){
                     int uid = m.ue_id;
                     if (uid < 0 || uid >= NUM_UE) continue;
 
