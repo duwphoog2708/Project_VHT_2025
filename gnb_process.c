@@ -192,7 +192,7 @@ void *downlink_thread(void *arg) {
                     }
                     pthread_mutex_lock(&shm->mutex);
                     if (m.msgid == MSG_NGAP_RESP) {
-                       shm->dl[uid].msgid = MSG_NGAP_RESP;
+                       shm->dl[uid].msgid =  MSG_RRC_UE_CONNECTION_RESPONSE;
                        //shm->ue_states[uid] = (m.bitmask & BM_5G_STMSI) ? 2 : 1; // CONNECTED or REGISTERED
                     } else if (m.msgid == MSG_NGAP_RRC_PAGING) {
                             shm->dl[uid].msgid = MSG_RRC_UE_PAGING; 
