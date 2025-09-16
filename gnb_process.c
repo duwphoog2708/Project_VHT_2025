@@ -192,13 +192,11 @@ void *downlink_thread(void *arg) {
                     }
                     pthread_mutex_lock(&shm->mutex);
                     if (m.msgid == MSG_NGAP_RESP) {
-                    shm->dl[uid].msgid = (m.bitmask & BM_5G_STMSI)
-                             ? MSG_RRC_UE_CONNECTION_RESPONSE
-                             : MSG
-                    //shm->ue_states[uid] = (m.bitmask & BM_5G_STMSI) ? 2 : 1; // CONNECTED or REGISTERED
+                       shm->dl[uid].msgid = MSG_NGAP_RESP;
+                       //shm->ue_states[uid] = (m.bitmask & BM_5G_STMSI) ? 2 : 1; // CONNECTED or REGISTERED
                     } else if (m.msgid == MSG_NGAP_RRC_PAGING) {
-                            shm->dl[uid].msgid = MSG_RRC_UE_PAGING; // Luôn là paging
-                            shm->ue_states[uid] = 1; // REGISTERED cho paging
+                            shm->dl[uid].msgid = MSG_RRC_UE_PAGING; 
+                       //     shm->ue_states[uid] = 1; // REGISTERED cho paging
                     }
                     shm->dl[uid].bitmask = m.bitmask;
                     shm->dl[uid].s_tmsi = m.s_tmsi & 0xFFFFFFFFFF;
