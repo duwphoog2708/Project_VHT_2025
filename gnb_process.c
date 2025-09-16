@@ -22,7 +22,8 @@
 #define MSG_RRC_UE_CONNECTION_RESPONSE 0x11
 #define MSG_RRC_NGAP_REQ              0x12
 #define MSG_NGAP_RESP                 0x13
-#define MSG_RRC_UE_PAGING             0x14
+#define MSG_NGAP_RRC_PAGING           0x14
+#define MSG_RRC_UE_PAGING             0x15
 
 #define BM_RANDOM_VALUE 0x01
 #define BM_5G_STMSI     0x02
@@ -178,14 +179,12 @@ void *downlink_thread(void *arg) {
                     continue;
                 }
 
-                if (m.msgid == MSG_NGAP_RESP){
+                if (m.msgid == MSG_NGAP_RESP || m.msgid == MSG_NGAP_RRC_PAGING){
                     int uid = m.ue_id;
                     if (uid < 0 || uid >= NUM_UE) continue;
 
                     pthread_mutex_lock(&shm->mutex);
-                    shm->dl[uid].msgid   = (m.bitmask & BM_5G_STMSI)
-                                           ? MSG_RRC_UE_CONNECTION_RESPONSE
-                                           : MSG_RRC_UE_PAGING;
+                    shm->dl[uid].msgid   = ;
                     shm->dl[uid].bitmask = m.bitmask;
                     shm->dl[uid].s_tmsi  = m.s_tmsi & 0xFFFFFFFFFF;
                     shm->dl_ready[uid]   = 1;
@@ -288,19 +287,43 @@ void *downlink_thread(void *arg) {
 //                     amf_conns[i].sock_fd = -1;
 //                     continue;
 //                 }
-//                 if (m.msgid == MSG_NGAP_RESP) {
-//                     int uid = m.ue_id;
-//                     if (uid < 0 || uid >= NUM_UE) continue;
-//                     pthread_mutex_lock(&shm->mutex);
-//                     shm->dl[uid].msgid = (m.bitmask & BM_5G_STMSI) ? MSG_RRC_UE_CONNECTION_RESPONSE : MSG_RRC_UE_PAGING;
-//                     shm->dl[uid].bitmask = m.bitmask;
-//                     shm->dl[uid].s_tmsi = m.s_tmsi & 0xFFFFFFFFFF;
-//                     shm->dl_ready[uid] = 1;
-//                     if (!(m.bitmask & BM_5G_STMSI)) shm->ue_states[uid] = 1;  // REGISTERED for initial
-//                     pthread_mutex_unlock(&shm->mutex);
-//                     printf("gNB: Forwarded %s to UE%d from AMF%d\n",
-//                            (m.bitmask & BM_5G_STMSI) ? "response" : "paging", uid, i + 1);
-//                 }
+                   if (m.msgid == MSG_NGAP_RESP || m.msgid == MSG_NGAP_RRC_PAGING) {
+    int uid = m.ue_id;
+    if (uid < 0 || uid >= NUM_UE) {
+        printf("gNB: Invalid UE ID %d from AMF%d, ignoring\n", uid, i + 1);
+        continue;
+    }
+    pthread_mutex_lock(&shm->mutex);
+    if (m.msgid == MSG_NGAP_RESP) {
+        shm->dl[uid].msgid = (m.bitmask & BM_5G_STMSI)
+                             ? MSG_RRC_UE_CONNECTION_RESPONSE
+                             : MSG_RRC_UE_PAGING;
+        shm->ue_states[uid] = (m.bitmask & BM_5G_STMSI) ? 2 : 1; // CONNECTED or REGISTERED
+    } else if (m.msgid == MSG_NGAP_RRC_PAGING) {
+        shm->dl[uid].msgid = MSG_RRC_UE_PAGING; // Luôn là paging
+        shm->ue_states[uid] = 1; // REGISTERED cho paging
+    }
+    shm->dl[uid].bitmask = m.bitmask;
+    shm->dl[uid].s_tmsi = m.s_tmsi & 0xFFFFFFFFFF;
+    shm->dl_ready[uid] = 1;
+    pthread_mutex_unlock(&shm->mutex);
+    printf("gNB: Forwarded %s from AMF%d to UE%d\n",
+           (shm->dl[uid].msgid == MSG_RRC_UE_CONNECTION_RESPONSE) ? "response" : "paging",
+           i + 1, uid);
+}
+                // if (m.msgid == MSG_NGAP_RESP) {
+                //     int uid = m.ue_id;
+                //     if (uid < 0 || uid >= NUM_UE) continue;
+                //     pthread_mutex_lock(&shm->mutex);
+                //     shm->dl[uid].msgid = (m.bitmask & BM_5G_STMSI) ? MSG_RRC_UE_CONNECTION_RESPONSE : MSG_RRC_UE_PAGING;
+                //     shm->dl[uid].bitmask = m.bitmask;
+                //     shm->dl[uid].s_tmsi = m.s_tmsi & 0xFFFFFFFFFF;
+                //     shm->dl_ready[uid] = 1;
+                //     if (!(m.bitmask & BM_5G_STMSI)) shm->ue_states[uid] = 1;  // REGISTERED for initial
+                //     pthread_mutex_unlock(&shm->mutex);
+                //     printf("gNB: Forwarded %s to UE%d from AMF%d\n",
+                //            (m.bitmask & BM_5G_STMSI) ? "response" : "paging", uid, i + 1);
+                // }
 //             }
 //         }
 //     }
