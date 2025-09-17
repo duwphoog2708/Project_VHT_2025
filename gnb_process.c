@@ -243,7 +243,7 @@ int main() {
     for (int i = 0; i < NUM_UE; i++) ue_to_amf[i] = -1;
 
     // SCTP server
-    int listen_fd = socket(AF_INET, SOCK_SEQPACKET, IPPROTO_SCTP);
+    int listen_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_SCTP);
     if (listen_fd < 0) { perror("gNB SCTP socket"); exit(1); }
 
     struct sockaddr_in addr = {0};
@@ -289,20 +289,20 @@ int main() {
             continue;
         }
 
-        struct sctp_status status;
-        socklen_t optlen = sizeof(status);
-        if (getsockopt(conn_fd, IPPROTO_SCTP, SCTP_STATUS, &status, &optlen) < 0) {
-            perror("getsockopt SCTP_STATUS");
-            close(conn_fd);
-            continue;
-        }
+        // struct sctp_status status;
+        // socklen_t optlen = sizeof(status);
+        // if (getsockopt(conn_fd, IPPROTO_SCTP, SCTP_STATUS, &status, &optlen) < 0) {
+        //     perror("getsockopt SCTP_STATUS");
+        //     close(conn_fd);
+        //     continue;
+        // }
 
-        int peel_fd = sctp_peeloff(listen_fd, status.sstat_assoc_id);
-        if (peel_fd < 0) {
-            perror("sctp_peeloff");
-            close(conn_fd);
-            continue;
-        }
+        // int peel_fd = sctp_peeloff(listen_fd, status.sstat_assoc_id);
+        // if (peel_fd < 0) {
+        //     perror("sctp_peeloff");
+        //     close(conn_fd);
+        //     continue;
+        // }
 
         // Gán vào slot trống đầu tiên
         int slot = -1;
@@ -313,12 +313,13 @@ int main() {
             }
         }
         if (slot >= 0) {
-            amf_conns[slot].sock_fd = peel_fd;
-            printf("gNB: AMF%d connected on socket %d\n", slot + 1, peel_fd);
+   //         amf_conns[slot].sock_fd = peel_fd;
+            amf_conns[slot].sock_fd = conn_fd;
+            printf("gNB: AMF%d connected on socket %d\n", slot + 1, conn_fd);
             connected_amf++;
         } else {
             printf("gNB: Too many AMFs connected, closing extra\n");
-            close(peel_fd);
+            close(conn_fd);
         }
     }
 
