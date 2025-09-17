@@ -170,6 +170,9 @@ void *amf_thread(void *arg) {
                 resp.s_tmsi = a->ue_s_tmsi[req.ue_id];
                 sctp_sendmsg(sock, &resp, sizeof(resp), NULL, 0, 0, 0, 0, 0, 0);
             }
+            else if (req.msgid == 0xFF) {
+                  printf("AMF%d final: %d UEs (%.2f%%)\n", a->amf_id+1, a->current_load, (float)a->current_load/NUM_UE*10);
+            }
         }
     }
 
