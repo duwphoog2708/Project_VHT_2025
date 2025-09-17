@@ -349,7 +349,7 @@ void *recv_thread(void *arg) {
                 if (ue->state == UE_IDLE && ue->s_tmsi == 0 &&
                     resp.bitmask == BM_RANDOM_VALUE) {
                     // Lần đầu attach → sang REGISTERED
-                    ue->s_tmsi = resp.s_tmsi & 0xFFFFFFFFFFULL;
+                    ue->s_tmsi = resp.s_tmsi & 0xFFFFFFFFFF;
                     ue->state = UE_REGISTERED;
                     shm->ue_states[ue->idx] = UE_REGISTERED;
 
@@ -366,7 +366,7 @@ void *recv_thread(void *arg) {
                 }
             }
             else if (resp.msgid == MSG_RRC_UE_PAGING) {
-                if ((resp.s_tmsi & 0xFFFFFFFFFFULL) == ue->s_tmsi) {
+                if ((resp.s_tmsi & 0xFFFFFFFFFF) == ue->s_tmsi) {
                     printf("[UE %d] Got PAGING -> uplink again\n", ue->idx);
                     ue->uplink_ready = 1; // bật cờ gửi uplink
                 }
