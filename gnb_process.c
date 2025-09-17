@@ -243,7 +243,7 @@ int main() {
     for (int i = 0; i < NUM_UE; i++) ue_to_amf[i] = -1;
 
     // SCTP server
-    int listen_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_SCTP);
+    int listen_fd = socket(AF_INET, SOCK_SEQPACKET, IPPROTO_SCTP);
     if (listen_fd < 0) { perror("gNB SCTP socket"); exit(1); }
 
     struct sockaddr_in addr = {0};
