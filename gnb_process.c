@@ -184,6 +184,8 @@ void *downlink_thread(void *arg) {
                     amf_conns[i].sock_fd = -1;
                     continue;
                 }
+		printf("gNB: Received from AMF%d, msgid=0x%x, ue_id=%d, bitmask=0x%x, s_tmsi=0x%llx\n",
+               i + 1, m.msgid, m.ue_id, m.bitmask, (unsigned long long)(m.s_tmsi & 0xFFFFFFFFFF));
                 if (m.msgid == MSG_NGAP_RESP || m.msgid == MSG_NGAP_RRC_PAGING) {
                     int uid = m.ue_id;
                     if (uid < 0 || uid >= NUM_UE) {
@@ -191,36 +193,21 @@ void *downlink_thread(void *arg) {
                         continue;
                     }
                     pthread_mutex_lock(&shm->mutex);
-                    if (m.msgid == MSG_NGAP_RESP) {
-                       shm->dl[uid].msgid =  MSG_RRC_UE_CONNECTION_RESPONSE;
+		    shm->dl[uid].msgid = (m.msgid == MSG_NGAP_RESP) ? MSG_RRC_UE_CONNECTION_RESPONSE : MSG_RRC_UE_PAGING;
+           //         if (m.msgid == MSG_NGAP_RESP) {
+         //              shm->dl[uid].msgid =  MSG_RRC_UE_CONNECTION_RESPONSE;
                        //shm->ue_states[uid] = (m.bitmask & BM_5G_STMSI) ? 2 : 1; // CONNECTED or REGISTERED
-                    } else if (m.msgid == MSG_NGAP_RRC_PAGING) {
-                            shm->dl[uid].msgid = MSG_RRC_UE_PAGING; 
+       //             } else if (m.msgid == MSG_NGAP_RRC_PAGING) {
+     //                       shm->dl[uid].msgid = MSG_RRC_UE_PAGING; 
                        //     shm->ue_states[uid] = 1; // REGISTERED cho paging
-                    }
+   //                 }
                     shm->dl[uid].bitmask = m.bitmask;
                     shm->dl[uid].s_tmsi = m.s_tmsi & 0xFFFFFFFFFF;
                     shm->dl_ready[uid] = 1;
                     pthread_mutex_unlock(&shm->mutex);
-                        // printf("gNB: Forwarded %s from AMF%d to UE%d\n",
-                           //(shm->dl[uid].msgid == MSG_RRC_UE_CONNECTION_RESPONSE) ? "response" : "paging",
-                             //    i + 1, uid);
+                    printf("gNB: Forwarded %s from AMF%d to UE%d (S-TMSI=0x%llx)\n",
+                            (m.msgid == MSG_NGAP_RESP) ? "response" : "paging", i + 1, uid, (unsigned long long)(m.s_tmsi & 0xFFFFFFFFFF));
                }
-                // if (m.msgid == MSG_NGAP_RESP || m.msgid == MSG_NGAP_RRC_PAGING){
-                //     int uid = m.ue_id;
-                //     if (uid < 0 || uid >= NUM_UE) continue;
-
-                //     pthread_mutex_lock(&shm->mutex);
-                //     shm->dl[uid].msgid   = ;
-                //     shm->dl[uid].bitmask = m.bitmask;
-                //     shm->dl[uid].s_tmsi  = m.s_tmsi & 0xFFFFFFFFFF;
-                //     shm->dl_ready[uid]   = 1;
-                //     pthread_mutex_unlock(&shm->mutex);
-
-                //     printf("gNB: Forwarded %s from AMF%d to UE%d\n",
-                //            (m.bitmask & BM_5G_STMSI) ? "response" : "paging",
-                //            i + 1, uid);
-                // }
             }
         }
     }
@@ -331,27 +318,40 @@ int main() {
     // Monitor loop
     while (1) {
         int connected = 0;
+	int total_assign = 0;
         pthread_mutex_lock(&shm->mutex);
         for (int i = 0; i < NUM_UE; i++) {
             if (shm->ue_states[i] == UE_CONNECTED) connected++;
-            if (shm->ue_states[i] == UE_IDLE && ue_to_amf[i] >= 0) {
-                int amf = ue_to_amf[i];
-                amf_counts[amf]--;
-                ue_to_amf[i] = -1;
-            }
+	    if(ue_to_amf[i] >= 0) total_assign++;
+           // if (shm->ue_states[i] == UE_IDLE && ue_to_amf[i] >= 0) {
+           //     int amf = ue_to_amf[i];
+           //     amf_counts[amf]--;
+           //     ue_to_amf[i] = -1;
+           // }
         }
         pthread_mutex_unlock(&shm->mutex);
-
-        printf("gNB: Connected=%d\n", connected);
+        printf("gNB: Connected=%d, Assigned=%d\n", connected, total_assign); // Thêm assigned để debug
         for (int i = 0; i < NUM_AMF; i++) {
             printf("  AMF%d: %d/%d\n", i+1, amf_counts[i], amf_capacity[i]);
         }
-        if (connected >= NUM_UE) {
-            printf("gNB: All UEs connected, exiting\n");
+    
+    // FIX: Break nếu all assigned (hoặc sau timeout, ví dụ 10s all paged)
+       if (total_assign >= NUM_UE && connected == NUM_UE) {  // Hoặc connected, tùy
+            printf("gNB: All UEs assigned/processed, exiting\n");
             break;
         }
-        sleep(1);
-    }
+    sleep(1);
+}
+ //       printf("gNB: Connected=%d\n", connected);
+  //      for (int i = 0; i < NUM_AMF; i++) {
+   //         printf("  AMF%d: %d/%d\n", i+1, amf_counts[i], amf_capacity[i]);
+    //    }
+   //     if (connected >= NUM_UE) {
+   //         printf("gNB: All UEs connected, exiting\n");
+    //        break;
+    //    }
+    //    sleep(1);
+  //  }
 
     // Cleanup
     Message term = { .msgid = 0xFF };
