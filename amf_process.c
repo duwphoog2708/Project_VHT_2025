@@ -28,6 +28,7 @@ typedef struct {
     uint64_t s_tmsi;
 } Message;
 
+//int current_load = 0;
 typedef struct {
     int amf_id;
     int capacity;
@@ -58,7 +59,7 @@ void print_current_time() {
     gettimeofday(&tv, NULL);
     char buff[64];
     tm_info = localtime(&tv.tv_sec);
-    strftime(buff, sizeof(buff), "%Y-%m-%d %H-%M-%S", tm_info);
+    strftime(buff, sizeof(buff), "%Y-%m-%d %H:%M:%S", tm_info);
     printf("[Time] %s:%06ld\n", buff, tv.tv_usec);
 }
 
@@ -150,7 +151,7 @@ void *amf_thread(void *arg) {
 
                 if (!a->registered_ues[req.ue_id]) {
                     a->registered_ues[req.ue_id] = 1;
-                    a->current_load++;
+                   a-> current_load++;
                     print_current_time();
                     printf("AMF%d: current load = %d (%.2f%%)\n",
                            a->amf_id+1, a->current_load,
@@ -169,9 +170,10 @@ void *amf_thread(void *arg) {
                 }
                 resp.s_tmsi = a->ue_s_tmsi[req.ue_id];
                 sctp_sendmsg(sock, &resp, sizeof(resp), NULL, 0, 0, 0, 0, 0, 0);
+		printf("AMF%d: Service response for UE%d (S-TMSI=0x%llx, load unchanged)\n", a->amf_id+1, req.ue_id, (unsigned long long)resp.s_tmsi);
             }
             else if (req.msgid == 0xFF) {
-                  printf("AMF%d final: %d UEs (%.2f%%)\n", a->amf_id+1, a->current_load, (float)a->current_load/NUM_UE*10);
+                  printf("AMF%d final: %d UEs (%.2f%%)\n", a->amf_id+1,a->current_load, (float)a->current_load/NUM_UE*100.0f);
             }
         }
     }
@@ -192,7 +194,7 @@ int main(int argc, char **argv) {
     for (int i = 0; i < NUM_AMF; i++) {
         amfs[i].amf_id = i;
         amfs[i].capacity = atoi(argv[i+1]);
-        amfs[i].current_load = 0;
+     //   amfs[i].current_load = 0;
         memset(amfs[i].registered_ues, 0, sizeof(amfs[i].registered_ues));
         memset(amfs[i].ue_s_tmsi, 0, sizeof(amfs[i].ue_s_tmsi));
         memset(amfs[i].ue_attach_time, 0, sizeof(amfs[i].ue_attach_time));
@@ -212,4 +214,3 @@ int main(int argc, char **argv) {
 
     return 0;
 }
-
