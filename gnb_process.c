@@ -73,6 +73,16 @@ void init_shm() {
     close(fd);
 }
 
+void print_current_time() {
+    struct timeval tv;
+    struct tm* tm_info;
+    gettimeofday(&tv, NULL);
+    char buff[64];
+    tm_info = localtime(&tv.tv_sec);
+    strftime(buff, sizeof(buff), "%Y-%m-%d %H:%M:%S", tm_info);
+    printf("[Time] %s:%06ld\n", buff, tv.tv_usec);
+}
+
 int pick_amf_wrr() {
     int total = 0;
     for (int i = 0; i < NUM_AMF; i++) total += amf_weight[i];
