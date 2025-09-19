@@ -57,6 +57,16 @@ typedef struct {
 
 UECtx ue_list[NUM_UE];
 
+void print_current_time() {
+    struct timeval tv;
+    struct tm* tm_info;
+    gettimeofday(&tv, NULL);
+    char buff[64];
+    tm_info = localtime(&tv.tv_sec);
+    strftime(buff, sizeof(buff), "%Y-%m-%d %H:%M:%S", tm_info);
+    printf("[Time] %s:%06ld\n", buff, tv.tv_usec);
+}
+
 static inline int rand_step500() {
     return 500 * (rand() % 6 + 1);  // 500..3000 ms
 }
