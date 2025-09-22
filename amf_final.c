@@ -188,12 +188,12 @@ void *amf_thread(void *arg) {
                 sctp_sendmsg(sock, &resp, sizeof(resp), NULL, 0, 0, 0, 0, 0, 0);
 		printf("AMF%d: Service response for UE%d (S-TMSI=0x%llx, load unchanged)\n", a->amf_id+1, req.ue_id, (unsigned long long)resp.s_tmsi);
             }
-            else if (req.msgid == 0xFF) {
-                  printf("AMF%d final: %d UEs (%.2f%%)\n", a->amf_id+1,a->current_load, (float)a->current_load/NUM_UE*100.0f);
-            }
+           // else if (req.msgid == 0xFF) {
+          //        printf("AMF%d final: %d UEs (%.2f%%)\n", a->amf_id+1,a->current_load, (float)a->current_load/NUM_UE*100.0f);
+          //  }
         }
     }
-
+     printf("AMF%d final: %d UEs (%.2f%%)\n", a->amf_id+1,a->current_load, (float)a->current_load/NUM_UE*100.0f);
     close(sock);
     a->sock_fd = -1;
     pthread_exit(NULL);
