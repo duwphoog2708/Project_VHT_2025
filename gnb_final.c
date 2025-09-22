@@ -319,13 +319,13 @@ int main() {
     }
 
     // Cleanup
-    Message term = { .msgid = 0xFF };
-    for (int i = 0; i < NUM_AMF; i++) {
-        if (amf_conns[i].sock_fd > 0) {
-            sctp_sendmsg(amf_conns[i].sock_fd, &term, sizeof(term), NULL, 0, 0, 0, 0, 0, 0);
-            close(amf_conns[i].sock_fd);
-        }
-    }
+    // Message term = { .msgid = 0xFF };
+    // for (int i = 0; i < NUM_AMF; i++) {
+    //     if (amf_conns[i].sock_fd > 0) {
+    //         sctp_sendmsg(amf_conns[i].sock_fd, &term, sizeof(term), NULL, 0, 0, 0, 0, 0, 0);
+    //         close(amf_conns[i].sock_fd);
+    //     }
+    // }
     close(listen_fd);
     return 0;
 }
