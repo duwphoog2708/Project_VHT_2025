@@ -69,8 +69,8 @@ AmfConn amf_conns[NUM_AMF];
 
 int ue_to_amf[NUM_UE];
 int amf_counts[NUM_AMF];
-int amf_capacity[NUM_AMF] = {0};  // Không fixed nữa, set động
-int amf_weight[NUM_AMF] = {0};    // Set động
+int amf_capacity[NUM_AMF] = {0};  
+int amf_weight[NUM_AMF] = {0};    
 int amf_current_weight[NUM_AMF];
 
 void init_shm() {
