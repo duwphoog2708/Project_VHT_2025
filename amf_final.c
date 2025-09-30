@@ -178,12 +178,12 @@ void *amf_thread(void *arg) {
                 resp.msgid = MSG_NGAP_RESP;
                 resp.bitmask = BM_5G_STMSI;
                 resp.ue_id = req.ue_id;
-                if (a->ue_s_tmsi[req.ue_id] == 0) {
-                    uint64_t s = ((uint64_t)(a->amf_id & 0x3FF) << 30) |
-                                 ((uint64_t)(a->amf_id & 0x3F) << 24) |
-                                 (req.tmsi & 0xFFFFFF);
-                    a->ue_s_tmsi[req.ue_id] = s;
-                }
+                // if (a->ue_s_tmsi[req.ue_id] == 0) {
+                //     uint64_t s = ((uint64_t)(a->amf_id & 0x3FF) << 30) |
+                //                  ((uint64_t)(a->amf_id & 0x3F) << 24) |
+                //                  (req.tmsi & 0xFFFFFF);
+                //     a->ue_s_tmsi[req.ue_id] = s;
+                // }
                 resp.s_tmsi = a->ue_s_tmsi[req.ue_id];
                 sctp_sendmsg(sock, &resp, sizeof(resp), NULL, 0, 0, 0, 0, 0, 0);
 		printf("AMF%d: Service response for UE%d (S-TMSI=0x%llx, load unchanged)\n", a->amf_id+1, req.ue_id, (unsigned long long)resp.s_tmsi);
