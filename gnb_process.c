@@ -25,7 +25,7 @@
 #define MSG_NGAP_RESP                 0x13
 #define MSG_NGAP_RRC_PAGING           0x14
 #define MSG_RRC_UE_PAGING             0x15
-#define MSG_INIT                      0x09  // Mới: msgid cho init message
+#define MSG_INIT                      0x09  
 
 #define BM_RANDOM_VALUE 0x01
 #define BM_5G_STMSI     0x02
@@ -59,6 +59,7 @@ typedef struct {
     int ue_states[NUM_UE];
 } SharedMemory;
 
+// Struct quản lý kết nối của các AMF
 typedef struct {
     int amf_id;
     int sock_fd;
@@ -67,11 +68,12 @@ typedef struct {
 SharedMemory *shm = NULL;
 AmfConn amf_conns[NUM_AMF];
 
-int ue_to_amf[NUM_UE];
-int amf_counts[NUM_AMF];
-int amf_capacity[NUM_AMF] = {0};  
+int ue_to_amf[NUM_UE];        // Lưu AMF idx được gán cho UE
+int amf_counts[NUM_AMF];      // Lưu số lượng UE phân bổ tại các AMF
+int amf_capacity[NUM_AMF] = {0};  // lưu dung lượng tối đa của các AMF
 int amf_weight[NUM_AMF] = {0};    
-int amf_current_weight[NUM_AMF];
+int amf_current_weight[NUM_AMF];   
+
 
 void init_shm() {
     int fd = shm_open(SHM_NAME, O_RDWR, 0666);
@@ -91,6 +93,7 @@ void print_current_time() {
     printf("[Time] %s:%06ld\n", buff, tv.tv_usec);
 }
 
+// hàm lựa chọn AMF để foward UL req từ UE
 int pick_amf_wrr() {
     int total = 0;
     for (int i = 0; i < NUM_AMF; i++) total += amf_weight[i];
@@ -299,19 +302,19 @@ int main() {
     // Monitor loop
     while (1) {
         int connected = 0;
-	int total_assign = 0;
+	int registered = 0;
         pthread_mutex_lock(&shm->mutex);
         for (int i = 0; i < NUM_UE; i++) {
             if (shm->ue_states[i] == UE_CONNECTED) connected++;
-	    if(ue_to_amf[i] >= 0) total_assign++;
+	    if(ue_to_amf[i] >= 0) registered++;
         }
         pthread_mutex_unlock(&shm->mutex);
-        printf("gNB: Connected=%d, Registered=%d\n", connected, total_assign); 
+        printf("gNB: Connected=%d, Registered=%d\n", connected, registered); 
         for (int i = 0; i < NUM_AMF; i++) {
             printf("  AMF%d: %d/%d\n", i+1, amf_counts[i], amf_capacity[i]);
         }
     
-       if (total_assign >= NUM_UE && connected == NUM_UE) {  
+       if (registered >= NUM_UE && connected == NUM_UE) {  
             printf("gNB: All UEs connected, exiting\n");
             break;
         }
