@@ -35,11 +35,11 @@ typedef struct {
 
 typedef struct {
     pthread_mutex_t mutex;
-    Message ul[NUM_UE];
-    int ul_ready[NUM_UE];
-    Message dl[NUM_UE];
-    int dl_ready[NUM_UE];
-    int ue_states[NUM_UE];
+    Message ul[NUM_UE];     // lưu bản tin UL
+    int ul_ready[NUM_UE];   // flag báo hiệu có bản tin UL
+    Message dl[NUM_UE];     // lưu bản tin DL
+    int dl_ready[NUM_UE];   // flag báo hiệu có bản tin DL
+    int ue_states[NUM_UE];  // Lưu trạng thái của UEs
 } SharedMemory;
 
 SharedMemory *shm = NULL;
@@ -48,10 +48,10 @@ typedef struct {
     int idx;
     uint64_t tmsi;
     uint64_t s_tmsi;
-    int x; // Registered -> Idle timer (ms)
+    int x;               // delay để Registered -> Idle timer (ms)
     enum UE_State state;
     unsigned long long next_action_time;
-    int uplink_ready;   // trigger attach uplink
+    int uplink_ready;   // trigger attach uplink 
 } UECtx;
 
 UECtx ue_list[NUM_UE];
@@ -66,6 +66,7 @@ static inline int rand_step500() {
     return 500 * (rand() % 6 + 1);  // 500..3000 ms
 }
 
+// hàm khởi tạo Shared Memory
 static void init_shm() {
     int fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
     ftruncate(fd, SHM_SIZE);
@@ -77,6 +78,7 @@ static void init_shm() {
     pthread_mutex_init(&shm->mutex, &a);
 }
 
+// hàm gửi bản tin UL
 void send_ul_msg(int idx, Message *m) {
     pthread_mutex_lock(&shm->mutex);
     shm->ul[idx] = *m;
@@ -84,6 +86,7 @@ void send_ul_msg(int idx, Message *m) {
     pthread_mutex_unlock(&shm->mutex);
 }
 
+// hàm nhận bản tin DL
 int poll_dl_msg(int idx, Message *out) {
     int got = 0;
     pthread_mutex_lock(&shm->mutex);
@@ -151,20 +154,17 @@ void *downlink_thread(void *arg) {
                     }
                     else if (ue->state == UE_IDLE && resp.bitmask == BM_5G_STMSI) {
                         ue->state = UE_CONNECTED;
-//			pthread_mutex_lock(&shm->mutex);
                         shm->ue_states[ue->idx] = UE_CONNECTED;
-//			pthread_mutex_unlock(&shm->mutex);
                         printf("[UE %d] Connected after Paging Response\n", ue->idx);
                     }
                 }
                 else if (resp.msgid == MSG_RRC_UE_PAGING) {
                     if ((resp.s_tmsi & 0xFFFFFFFFFF) == ue->s_tmsi) {
                         ue->uplink_ready = 1;
+                        // Trường hợp UE nhận Paging khi vẫn ở UE_REGISTERED do y < x 
                         if (ue->state == UE_REGISTERED) {
                             ue->state = UE_IDLE;
- //			    pthread_mutex_lock(&shm->mutex);
-                            shm->ue_states[ue->idx] = UE_IDLE;
-//			    pthread_mutex_unlock(&shm->mutex);
+                            shm->ue_states[ue->idx] = UE_IDLE; // chuyển state UE sang IDLE để gửi bản tin re-attach
                             ue->next_action_time = 0;
                             printf("[UE %d] Paging while REGISTERED -> force to IDLE\n", ue->idx);
                         }
@@ -176,10 +176,8 @@ void *downlink_thread(void *arg) {
             if (ue->state == UE_REGISTERED &&
                 ue->next_action_time > 0 &&
                 now >= ue->next_action_time) {
-                ue->state = UE_IDLE;
-//		pthread_mutex_lock(&shm->mutex);
+                ue->state = UE_IDLE
                 shm->ue_states[ue->idx] = UE_IDLE;
-//		pthread_mutex_unlock(&shm->mutex);
                 ue->uplink_ready = 0;
                 ue->next_action_time = 0;
                 printf("[UE %d] Timer expired -> back to IDLE\n", ue->idx);
