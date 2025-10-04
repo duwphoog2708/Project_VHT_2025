@@ -30,9 +30,9 @@ typedef struct {
     uint64_t s_tmsi;
 } Message;
 
-// Mới: Struct cho init message
+// khởi tạo init message để gán capacity cho gnb
 typedef struct {
-    uint8_t msgid;  // 0x01
+    uint8_t msgid;  
     int amf_id;
     int capacity;
 } InitMessage;
@@ -42,8 +42,8 @@ typedef struct {
     int capacity;
     int current_load;
     int sock_fd;
-    uint16_t registered_ues[NUM_UE];
-    uint64_t ue_s_tmsi[NUM_UE];
+    uint16_t registered_ues[NUM_UE];  // Lưu số lương UE registered
+    uint64_t ue_s_tmsi[NUM_UE];       // lưu s-tmsi của UE
     unsigned long long ue_attach_time[NUM_UE]; // Lưu thời gian attach
     int ue_paging_delay[NUM_UE]; // Lưu y random cho mỗi UE
 } AMF;
@@ -51,6 +51,7 @@ typedef struct {
 AMF amfs[NUM_AMF];
 pthread_mutex_t send_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+// Hàm lấy thời gian thực
 unsigned long long current_millis() {
     struct timeval tv;
     gettimeofday(&tv, NULL);
@@ -61,6 +62,7 @@ static inline int rand_step500() {
     return 500 * (rand() % 6 + 1); // 500..3000 ms
 }
 
+// Hàm in time thực
 void print_current_time() {
     struct timeval tv;
     struct tm* tm_info;
@@ -71,6 +73,7 @@ void print_current_time() {
     printf("[Time] %s:%06ld\n", buff, tv.tv_usec);
 }
 
+// Thread gửi paging theo y (ms) delay
 void *paging_thread(void *arg) {
     srand(time(NULL));
     while (1) {
@@ -79,6 +82,7 @@ void *paging_thread(void *arg) {
             AMF *a = &amfs[i];
             for (int j = 0; j < NUM_UE; j++) {
                 if (a->registered_ues[j] && a->ue_s_tmsi[j] && a->ue_attach_time[j] > 0) {
+					
                     // Kiểm tra nếu đã đến thời điểm gửi paging (attach_time + y)
                     if (now >= a->ue_attach_time[j] + a->ue_paging_delay[j]) {
                         Message paging = {0};
@@ -108,6 +112,7 @@ void *paging_thread(void *arg) {
     return NULL;
 }
 
+// Thread xử lý kết nối của mỗi AMF
 void *amf_thread(void *arg) {
     AMF *a = (AMF *)arg;
 
@@ -188,9 +193,6 @@ void *amf_thread(void *arg) {
                 sctp_sendmsg(sock, &resp, sizeof(resp), NULL, 0, 0, 0, 0, 0, 0);
 		printf("AMF%d: Service response for UE%d (S-TMSI=0x%llx, load unchanged)\n", a->amf_id+1, req.ue_id, (unsigned long long)resp.s_tmsi);
             }
-           // else if (req.msgid == 0xFF) {
-          //        printf("AMF%d final: %d UEs (%.2f%%)\n", a->amf_id+1,a->current_load, (float)a->current_load/NUM_UE*100.0f);
-          //  }
         }
     }
      printf("AMF%d final: %d UEs (%.2f%%)\n", a->amf_id+1,a->current_load, (float)a->current_load/NUM_UE*100.0f);
